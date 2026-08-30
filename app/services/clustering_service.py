@@ -142,6 +142,11 @@ async def cluster_unclustered_content(
     narratives_created = 0
     newly_clustered_count = 0
 
+    # Note: HDBSCAN estimates density from the dataset itself, so a handful of posts on a
+    # single topic with nothing else in the unclustered pool can legitimately all come back
+    # as noise (-1) - there's no sparser region to contrast against. This resolves itself
+    # once there's topic diversity in the pool (multiple narratives' worth of posts), which
+    # is the realistic steady-state case; verified via tests/integration/test_clustering_service.py.
     if len(still_unclustered) >= MIN_CLUSTER_SIZE:
         embeddings = np.array([item.embedding for item in still_unclustered], dtype=float)
         clusterer = hdbscan.HDBSCAN(min_cluster_size=MIN_CLUSTER_SIZE, min_samples=1)

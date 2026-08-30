@@ -36,13 +36,16 @@ WORKDIR /app
 COPY --from=builder --chown=appuser:appuser /app /app
 
 ENV PATH="/app/.venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PORT=8000
 
 USER appuser
 
 EXPOSE 8000
 
+# Cloud Run injects PORT (typically 8080) and requires the container to listen on it;
+# shell form is required here so $PORT actually expands (defaults to 8000 for local `docker run`).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD sh -c "curl -f http://localhost:${PORT:-8000}/health || exit 1"
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
