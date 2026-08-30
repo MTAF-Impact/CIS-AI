@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.claim import Claim
 from app.models.enums import ClaimStatus, ClaimType
 from app.models.policy import Policy
-from app.services import rag_service
+from app.services import go_backend_sync, rag_service
 from app.services.activity_service import render_prebunk_activity
 from app.services.clustering_service import assign_or_create_topic
 from app.services.embedding_service import EmbeddingService
@@ -68,6 +68,7 @@ async def predict_non_existing_claim(
     )
     db.add(claim)
     await db.flush()
+    await go_backend_sync.sync_claim_review_status(db, claim.id, claim.status)
 
     return NonExistingClaimPrediction(
         claim=claim,

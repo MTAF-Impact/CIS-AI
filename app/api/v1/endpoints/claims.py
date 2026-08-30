@@ -28,7 +28,7 @@ from app.schemas.claim import (
     TopicBrief,
 )
 from app.schemas.content import ContentItemRead
-from app.services import scoring_engine
+from app.services import go_backend_sync, scoring_engine
 from app.services.claim_prediction_service import predict_non_existing_claim
 from app.services.clustering_service import (
     cluster_unclustered_content,
@@ -315,6 +315,7 @@ async def update_status(
         raise HTTPException(status_code=404, detail="Claim not found")
 
     claim.status = payload.status
+    await go_backend_sync.sync_claim_review_status(db, claim.id, claim.status)
     await db.commit()
 
     claim = await _fetch_claim_with_relations(db, claim_id)
@@ -366,6 +367,7 @@ async def add_alert(claim_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> 
 
     if await db.get(ClaimAlert, claim_id) is None:
         db.add(ClaimAlert(claim_id=claim_id))
+        await go_backend_sync.sync_claim_alert_added(db, claim_id)
         await db.commit()
 
     claim = await _fetch_claim_with_relations(db, claim_id)
@@ -382,6 +384,7 @@ async def remove_alert(claim_id: uuid.UUID, db: AsyncSession = Depends(get_db)) 
     alert = await db.get(ClaimAlert, claim_id)
     if alert is not None:
         await db.delete(alert)
+        await go_backend_sync.sync_claim_alert_removed(db, claim_id)
         await db.commit()
 
     return await _to_list_item(db, claim, is_alerted=False)

@@ -10,16 +10,42 @@ Detector) is out of scope per the PRD - `/coordination/check-cib` is kept as a s
 capability from the earlier design, ahead of F5's own future spec.
 
 > **Integration note (2026-08-31 demo):** the real request path is **FE -> Go backend -> this
-> service**. For now this service owns full persistence for everything (claims, topics,
-> policies, alerts, admin_settings) and Go is treated as a thin proxy in front of it - that was
-> an explicit, temporary call to hit the deadline, not a confirmed final architecture. Several
-> pieces built here (F3 Alert CRUD, F4 Admin threshold CRUD, F2's file upload/storage/list/
-> search/download) have no actual AI/ML in them and are natural Go-backend territory; only the
-> AI-specific parts (embeddings, LLM calls, clustering, the Claim Scoring System, F2's
-> matchmaking step) strictly need to live here. **Re-check this split during integration** -
-> if Go ends up owning its own persistence for the non-AI pieces, those endpoints need to
-> become closer to stateless compute (accept input, return AI-derived output, let Go persist
-> it) instead of full CRUD owners.
+> service**, and as of 2026-08-30 they share **the same Supabase Postgres database**. The Go
+> backend owns its own tables, all prefixed `cis_` (`cis_users`, `cis_refresh_tokens`,
+> `cis_settings`, `cis_policies`, `cis_claim_alerts`, `cis_claim_reviews`,
+> `cis_claim_score_snapshots`) - this service must **never** touch those tables except via the
+> deliberate dual-writes below (`scripts/reset_schema.py` explicitly excludes anything prefixed
+> `cis_` from its drop step).
+>
+> This service still owns full persistence for its own domain (claims, topics, policies,
+> alerts, admin_settings) - Go's `cis_*` tables largely mirror a subset of that data for the
+> FE, so **every write this service makes that has a Go-side counterpart is dual-written** via
+> `app/services/go_backend_sync.py`, best-effort and never allowed to fail the primary write
+> (each dual-write runs in its own `SAVEPOINT`):
+>
+> | This service writes | Also dual-written to | Trigger |
+> |---|---|---|
+> | `Claim.status` | `cis_claim_reviews` (upsert by `claim_id`) | claim creation (initial `unreviewed`), `PATCH /claims/{id}/status` |
+> | `ClaimAlert` add/remove | `cis_claim_alerts` | `POST`/`DELETE /claims/{id}/alert` |
+> | `ClaimScoreSnapshot` (final score only) | `cis_claim_score_snapshots` (full R/V/F/H/EI/NPR/discount breakdown) | every `rescore_claim()` call (clustering, standalone rescore, harm confirm) |
+> | `AdminSetting.over_threshold` | `cis_settings` (`key='alert_threshold'`, upsert) | `PUT /admin/settings` |
+>
+> **Not yet wired: `cis_policies`.** Its shape (`file_path`/`file_mime_type`/`file_size_bytes`,
+> `processing_status`/`processing_error`/`processing_attempts`, and an `ai_policy_id`
+> back-reference) describes a different workflow than a simple mirror: Go owns the upload and
+> file storage, and expects this service to react to a `cis_policies` row and write back
+> `ai_policy_id` + `processing_status` once matchmaking finishes - not receive the file
+> directly the way `POST /policies` currently does. This needs an explicit handoff contract
+> with the Go team (how do we get notified of a new `cis_policies` row - a direct call passing
+> its id, or do we poll for `processing_status='pending'`? where does `file_path` actually
+> point?) before it's safe to implement - confirm this first during integration.
+>
+> Beyond that, several pieces built here (F3 Alert CRUD, F4 Admin threshold CRUD, F2's file
+> upload/storage/list/search/download) have no actual AI/ML in them and are natural
+> Go-backend territory now that `cis_*` tables for them already exist - only the AI-specific
+> parts (embeddings, LLM calls, clustering, the Claim Scoring System, F2's matchmaking step)
+> strictly need to live here. Re-check this split during integration rather than assuming the
+> current "both sides persist, dual-written" arrangement is the final shape.
 
 - **Framework:** FastAPI + Uvicorn, Pydantic v2
 - **DB/ORM:** SQLAlchemy 2.0 (async, `asyncpg`) against Supabase Postgres with `pgvector`

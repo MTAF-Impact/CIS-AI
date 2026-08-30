@@ -22,7 +22,7 @@ from app.models.content import ContentItem
 from app.models.enums import ClaimStatus, ClaimType, Stance
 from app.models.topic import Topic
 from app.models.topic_volume_bucket import TopicVolumeBucket
-from app.services import falseness_service, scoring_engine
+from app.services import falseness_service, go_backend_sync, scoring_engine
 from app.services.activity_service import generate_and_cache_debunk_activity
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.llm_client import LLMClient, get_llm_client
@@ -294,6 +294,7 @@ async def rescore_claim(db: AsyncSession, claim: Claim) -> None:
     # Powers the F3 trend chart [C1] - Claim only ever holds the current score, so this
     # is the only history of how FinalClaimScore moved over time.
     db.add(ClaimScoreSnapshot(claim_id=claim.id, final_claim_score=final))
+    await go_backend_sync.sync_claim_score_snapshot(db, claim)
 
 
 async def rescore_all_existing_claims(db: AsyncSession) -> int:
@@ -348,6 +349,7 @@ async def build_claim_from_content_items(
     )
     db.add(claim)
     await db.flush()
+    await go_backend_sync.sync_claim_review_status(db, claim.id, claim.status)
 
     try:
         stances = await llm.classify_stances_batch(
