@@ -160,7 +160,7 @@ async def cluster_unclustered_content(
             try:
                 summary = await gemini.summarize_narrative(sample_texts)
                 title, summary_text = summary.title, summary.summary
-            except Exception:  # noqa: BLE001 - never let labeling failures block clustering
+            except Exception:
                 logger.exception("Gemini narrative summarization failed; using fallback title")
                 title = sample_texts[0][:80]
                 summary_text = None

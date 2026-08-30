@@ -1,9 +1,12 @@
+import asyncio
 import json
 import logging
+import re
 from functools import lru_cache
 from typing import TypeVar
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel
 
@@ -18,6 +21,20 @@ from app.schemas.analysis import (
 logger = logging.getLogger(__name__)
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
+
+MAX_RATE_LIMIT_RETRIES = 3
+DEFAULT_RATE_LIMIT_RETRY_SECONDS = 15.0
+_RETRY_DELAY_PATTERN = re.compile(r"retry in ([\d.]+)s", re.IGNORECASE)
+
+
+class GeminiNotConfiguredError(RuntimeError):
+    """Raised when a Gemini call is attempted without a configured GEMINI_API_KEY."""
+
+
+def _extract_retry_delay_seconds(exc: Exception) -> float:
+    match = _RETRY_DELAY_PATTERN.search(str(exc))
+    return float(match.group(1)) + 1.0 if match else DEFAULT_RATE_LIMIT_RETRY_SECONDS
+
 
 CONTENT_ANALYSIS_SYSTEM_PROMPT = """\
 You are a climate-misinformation analyst for a civic decision-support system. \
@@ -88,11 +105,27 @@ of what this narrative is about and why people are engaging with it.
 
 
 class GeminiClient:
-    """Thin async wrapper around the google-genai SDK with strict structured JSON output."""
+    """Thin async wrapper around the google-genai SDK with strict structured JSON output.
+
+    Client construction is lazy and never raises: a missing/invalid GEMINI_API_KEY only
+    surfaces when a generation call is actually made, so the rest of the app (and demo
+    seeding) can still start up and exercise non-Gemini code paths without a key configured.
+    """
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self._model = model or settings.GEMINI_MODEL
-        self._client = genai.Client(api_key=api_key or settings.GEMINI_API_KEY)
+        self._api_key = api_key or settings.GEMINI_API_KEY
+        self._client: genai.Client | None = None
+
+    def _get_client(self) -> genai.Client:
+        if self._client is None:
+            if not self._api_key:
+                raise GeminiNotConfiguredError(
+                    "GEMINI_API_KEY is not configured - set it in your .env to use Gemini "
+                    "analysis features."
+                )
+            self._client = genai.Client(api_key=self._api_key)
+        return self._client
 
     async def _generate_structured(
         self,
@@ -101,16 +134,34 @@ class GeminiClient:
         system_instruction: str,
         schema: type[SchemaT],
     ) -> SchemaT:
-        response = await self._client.aio.models.generate_content(
-            model=self._model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                response_schema=schema,
-                temperature=0.2,
-            ),
-        )
+        client = self._get_client()
+
+        response = None
+        for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+            try:
+                response = await client.aio.models.generate_content(
+                    model=self._model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json",
+                        response_schema=schema,
+                        temperature=0.2,
+                    ),
+                )
+                break
+            except genai_errors.ClientError as exc:
+                is_rate_limited = getattr(exc, "code", None) == 429
+                if not is_rate_limited or attempt >= MAX_RATE_LIMIT_RETRIES:
+                    raise
+                delay = _extract_retry_delay_seconds(exc)
+                logger.warning(
+                    "Gemini rate-limited (attempt %d/%d), retrying in %.1fs",
+                    attempt + 1,
+                    MAX_RATE_LIMIT_RETRIES,
+                    delay,
+                )
+                await asyncio.sleep(delay)
 
         if response.parsed is not None:
             return response.parsed  # type: ignore[return-value]

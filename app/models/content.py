@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, Float, ForeignKey, String, Text, func
@@ -9,6 +10,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.config import settings
 from app.core.database import Base
 from app.models.enums import ClassificationLabel, ContentSource, MoralFoundation
+
+if TYPE_CHECKING:
+    from app.models.narrative import Narrative
 
 
 class ContentItem(Base):

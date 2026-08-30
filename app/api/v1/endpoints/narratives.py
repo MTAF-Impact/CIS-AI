@@ -10,7 +10,12 @@ from app.core.database import get_db
 from app.models.enums import NarrativeStatus, RiskLevel
 from app.models.fault_line import FaultLine
 from app.models.narrative import Narrative
-from app.schemas.narrative import ClusterNowResponse, FaultLineRead, NarrativeDetailRead, NarrativeRead
+from app.schemas.narrative import (
+    ClusterNowResponse,
+    FaultLineRead,
+    NarrativeDetailRead,
+    NarrativeRead,
+)
 from app.services import risk_engine
 from app.services.clustering_service import cluster_unclustered_content
 from app.services.gemini_client import GeminiClient, get_gemini_client

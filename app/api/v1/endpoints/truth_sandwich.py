@@ -12,7 +12,11 @@ from app.schemas.response import (
     TruthSandwichGenerateRequest,
 )
 from app.services.embedding_service import EmbeddingService, get_embedding_service
-from app.services.gemini_client import GeminiClient, get_gemini_client
+from app.services.gemini_client import (
+    GeminiClient,
+    GeminiNotConfiguredError,
+    get_gemini_client,
+)
 from app.services.truth_sandwich_service import (
     NarrativeNotFoundError,
     generate_truth_sandwich_for_narrative,
@@ -37,6 +41,8 @@ async def generate_response(
         )
     except NarrativeNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except GeminiNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.patch("/{response_id}/review", response_model=InterventionResponseRead)

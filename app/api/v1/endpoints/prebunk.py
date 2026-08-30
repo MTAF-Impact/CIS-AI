@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -11,7 +11,11 @@ from app.schemas.response import (
 from app.services import rag_service
 from app.services.cib_detector import detect_coordinated_behavior
 from app.services.embedding_service import EmbeddingService, get_embedding_service
-from app.services.gemini_client import GeminiClient, get_gemini_client
+from app.services.gemini_client import (
+    GeminiClient,
+    GeminiNotConfiguredError,
+    get_gemini_client,
+)
 
 router = APIRouter(prefix="/prebunk", tags=["prebunk"])
 
@@ -29,7 +33,10 @@ async def predict_prebunk(
     fault_lines = await rag_service.retrieve_relevant_fault_lines(db, query_text, embedder)
     grounding_context = rag_service.build_grounding_context(fault_lines)
 
-    prediction = await gemini.predict_prebunk(payload.policy_description, grounding_context)
+    try:
+        prediction = await gemini.predict_prebunk(payload.policy_description, grounding_context)
+    except GeminiNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return PrebunkPredictResponse(
         predicted_attack_angle=prediction.predicted_attack_angle,
