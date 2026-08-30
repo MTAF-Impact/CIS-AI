@@ -217,16 +217,26 @@ async def _npr_volumes(
     return counts.get(Stance.SUPPORTING, 0), counts.get(Stance.OPPOSING, 0)
 
 
-async def _emotional_intensity_inputs(db: AsyncSession, claim_id: uuid.UUID) -> tuple[float, float]:
+async def _emotional_intensity_inputs(
+    db: AsyncSession, claim_id: uuid.UUID, stance: Stance
+) -> tuple[float, float] | None:
+    """Returns (avg_outrage, negative_reaction_ratio) for the given stance's content, or
+    None if there's no content with that stance yet (distinguishes "genuinely zero
+    intensity" from "nothing to measure" - matters for emotional_intensity_opposing,
+    which should stay unset until Opposing content actually exists)."""
     row = (
         await db.execute(
             select(
                 func.avg(ContentItem.outrage_score),
                 func.coalesce(func.sum(ContentItem.negative_reaction_count), 0),
                 func.coalesce(func.sum(ContentItem.positive_reaction_count), 0),
-            ).where(ContentItem.claim_id == claim_id, ContentItem.stance == Stance.SUPPORTING)
+                func.count(ContentItem.id),
+            ).where(ContentItem.claim_id == claim_id, ContentItem.stance == stance)
         )
     ).one()
+    if row[3] == 0:
+        return None
+
     avg_outrage = float(row[0]) if row[0] is not None else 0.0
     negative_sum, positive_sum = row[1], row[2]
     total_reactions = negative_sum + positive_sum
@@ -234,7 +244,7 @@ async def _emotional_intensity_inputs(db: AsyncSession, claim_id: uuid.UUID) -> 
     return avg_outrage, negative_ratio
 
 
-async def _rescore_claim(db: AsyncSession, claim: Claim) -> None:
+async def rescore_claim(db: AsyncSession, claim: Claim) -> None:
     """Recomputes everything EXCEPT Reach (handled separately per-topic by
     _renormalize_topic_reach, which must run first) and Harm (classified once at claim
     creation - see the Pass 2 harm block below; it doesn't drift with new supporting
@@ -256,8 +266,15 @@ async def _rescore_claim(db: AsyncSession, claim: Claim) -> None:
         else None
     )
 
-    avg_outrage, negative_ratio = await _emotional_intensity_inputs(db, claim.id)
-    ei = scoring_engine.emotional_intensity(avg_outrage, negative_ratio)
+    supporting_ei_inputs = await _emotional_intensity_inputs(db, claim.id, Stance.SUPPORTING)
+    ei = scoring_engine.emotional_intensity(*supporting_ei_inputs) if supporting_ei_inputs else 0.0
+
+    # Display-only diagnostic (PRD Section 5.4.6) - computed the same way as EI but on
+    # Opposing-side content, and NEVER fed into claim_score/discount/final below.
+    opposing_ei_inputs = await _emotional_intensity_inputs(db, claim.id, Stance.OPPOSING)
+    ei_opposing = (
+        scoring_engine.emotional_intensity(*opposing_ei_inputs) if opposing_ei_inputs else None
+    )
 
     harm = claim.harm_score if claim.harm_score is not None else 0.0
     score = scoring_engine.claim_score(claim.reach_score or 0.0, velocity, falseness, harm, ei)
@@ -266,6 +283,7 @@ async def _rescore_claim(db: AsyncSession, claim: Claim) -> None:
     claim.velocity_score = velocity
     claim.falseness_score = falseness
     claim.emotional_intensity_score = ei
+    claim.emotional_intensity_opposing = ei_opposing
     claim.npr = npr
     claim.discount_factor = discount
     claim.is_dormant = is_dormant
@@ -283,7 +301,7 @@ async def rescore_all_existing_claims(db: AsyncSession) -> int:
     for topic_id in topics:
         claims = await _renormalize_topic_reach(db, topic_id)
         for claim in claims:
-            await _rescore_claim(db, claim)
+            await rescore_claim(db, claim)
             rescored += 1
     await db.commit()
     return rescored
@@ -464,7 +482,7 @@ async def cluster_unclustered_content(
             claims_to_rescore[claim.id] = claim
 
     for claim in claims_to_rescore.values():
-        await _rescore_claim(db, claim)
+        await rescore_claim(db, claim)
 
     await db.commit()
 

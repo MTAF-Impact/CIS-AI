@@ -64,6 +64,7 @@ class TestClusterUnclusteredContent:
             assert claim.falseness_score is None  # empty OfficialSource corpus
             assert claim.harm_score == pytest.approx(0.35 * 40 + 0.30 * 50 + 0.20 * 30 + 0.15 * 20)
             assert claim.emotional_intensity_score == pytest.approx(30.0)  # 50*0.6 + 50*0
+            assert claim.emotional_intensity_opposing is None  # no Opposing content yet
             assert claim.npr == pytest.approx(0.0)  # all-Supporting, no Opposing content yet
             assert claim.is_dormant is False
             assert claim.discount_factor == pytest.approx(1.0)  # below reliability threshold

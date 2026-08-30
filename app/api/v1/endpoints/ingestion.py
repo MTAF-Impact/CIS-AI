@@ -36,12 +36,13 @@ async def _analyze_and_build_item(
         source=payload.source,
         author_id=payload.author_id,
         location=payload.location,
-        classification=analysis.classification,
-        confidence=analysis.confidence,
         outrage_score=analysis.outrage_score,
         moral_foundation=analysis.moral_foundation,
         extracted_claim=analysis.extracted_claim,
         underlying_grievance=analysis.underlying_grievance,
+        impressions=payload.impressions,
+        positive_reaction_count=payload.positive_reaction_count,
+        negative_reaction_count=payload.negative_reaction_count,
         embedding=embedding,
     )
 
