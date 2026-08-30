@@ -49,9 +49,15 @@ class FakeLLMClient:
 
     async def summarize_claim(self, sample_texts: list[str]) -> ClaimSummarySchema:
         self.calls.append(("summarize_claim", (sample_texts,), {}))
+        # Echoes the actual first sample text (lightly templated) rather than a fixed
+        # literal string - a real LLM's synthesized claim_statement embeds close to its
+        # source content, which matters for tests exercising topic assignment and
+        # claim-attach similarity (identical claim_statement text across every cluster
+        # would collapse all claims into one topic regardless of their real content).
+        representative = sample_texts[0] if sample_texts else "General claim"
         return ClaimSummarySchema(
-            claim_statement="Fake claim statement synthesized for testing.",
-            topic_label=_fake_topic_label(sample_texts[0]) if sample_texts else "General",
+            claim_statement=f"Claim: {representative}",
+            topic_label=_fake_topic_label(representative),
         )
 
     async def classify_stance(self, claim_statement: str, post_text: str) -> Stance:
