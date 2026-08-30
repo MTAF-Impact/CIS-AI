@@ -2,8 +2,8 @@ import json
 import logging
 import sys
 import time
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Self
 
 _RESERVED_LOG_RECORD_ATTRS = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
 
@@ -16,7 +16,7 @@ class JSONFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         # Note: logging.Formatter.formatTime() delegates to time.strftime(), which does
         # NOT support %f (microseconds) - only datetime.strftime() does. Build it manually.
-        timestamp = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(
+        timestamp = datetime.fromtimestamp(record.created, tz=UTC).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
         payload: dict[str, Any] = {
@@ -65,7 +65,7 @@ def configure_logging(level: str = "INFO", json_format: bool = False) -> None:
 class Timer:
     """Small context manager for measuring elapsed time in milliseconds for log fields."""
 
-    def __enter__(self) -> "Timer":
+    def __enter__(self) -> Self:
         self._start = time.perf_counter()
         return self
 

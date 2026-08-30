@@ -48,6 +48,51 @@ docker build -t cis-ai-service .
 docker run --env-file .env -p 8000:8000 cis-ai-service
 ```
 
+`torch` is pinned to the CPU-only wheel index (`[tool.uv.sources]` in `pyproject.toml`) -
+PyPI's default Linux wheels bundle full CUDA/nvidia-\* libraries that are never used (this
+service only ever runs embeddings on CPU, including on Cloud Run). That keeps the image at
+~3.4GB instead of ~10GB; skipping it would still work, just build/deploy slower.
+
+## Testing
+
+```bash
+# Unit tests only - no external services needed (uses the real embedding model, but no DB/LLM)
+uv run pytest tests/unit
+
+# Full suite (unit + integration) - needs a local Postgres with pgvector:
+docker run -d --name cis-ai-test-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 pgvector/pgvector:pg16
+uv run pytest
+```
+
+- `tests/unit/` - pure logic (risk engine, CIB detector, RAG text-building, schema validation).
+  No DB, no LLM key required. The CIB detector tests use the real embedding model (via the
+  session-scoped `real_embedder` fixture) since the heuristic depends on genuine text-similarity
+  semantics that a fake/random embedder wouldn't preserve.
+- `tests/integration/` (marked `@pytest.mark.integration`) - hits the FastAPI app over HTTP
+  (`httpx.AsyncClient` + `ASGITransport`) against a real Postgres+pgvector database, pointed at
+  by `TEST_DATABASE_URL` (defaults to `postgresql+asyncpg://postgres:postgres@localhost:5432/postgres`,
+  matching the `pgvector/pgvector:pg16` container above and the same image CI uses). These tests
+  **never** touch the real `DATABASE_URL`/Supabase instance and **never** call a real LLM -
+  `app.services.llm_client.get_llm_client` is always overridden with `tests.fakes.FakeLLMClient`.
+- Each simulated HTTP request in a test gets its own fresh DB session (mirroring how `get_db`
+  works in production) rather than reusing one session across requests - asyncpg connections
+  can't interleave two logical units of work, which is also why the test suite runs on a single
+  session-scoped event loop (`asyncio_default_fixture_loop_scope = "session"` in
+  `pyproject.toml`) rather than pytest-asyncio's default per-test loop.
+
+## CI/CD
+
+`.github/workflows/ci.yml` runs on every push/PR to `main`/`dev`:
+- **lint-and-test**: `ruff check`, then the full test suite against a `pgvector/pgvector:pg16`
+  service container (same image as local testing above). The MiniLM model is cached across runs
+  via `actions/cache` so it isn't re-downloaded every run.
+- **docker-build**: builds the Dockerfile (no push) to catch deployability regressions early.
+
+No deploy step yet - the plan is to deploy to **Google Cloud Run**, which is why logging is
+already structured JSON in production (`app/core/logging_config.py` emits `severity`/`message`
+fields Cloud Logging parses natively) and the Dockerfile is a standard multi-stage
+`uvicorn`-on-`$PORT`-style build ready for `gcloud run deploy`.
+
 ## Architecture
 
 ```

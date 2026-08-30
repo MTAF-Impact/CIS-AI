@@ -20,6 +20,7 @@ dependencies = [
     "httpx>=0.27.0",
     "python-multipart>=0.0.9",
     "openai>=1.60.0",
+    "torch>=2.0.0",
 ]
 
 [dependency-groups]
@@ -36,7 +37,31 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 
+# We only ever run embeddings on CPU (no GPU in this service or its Cloud Run target), but
+# torch's default PyPI wheels bundle full CUDA/nvidia-* libraries on Linux regardless -
+# pointing it at PyTorch's CPU-only wheel index avoids ~9GB of unused CUDA deps in the image.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.ruff.lint]
 # B008: FastAPI's Depends()/Query() default-argument pattern is idiomatic, not a bug.
 # ISC004: demo seed data intentionally wraps long literal post text across lines.
 ignore = ["B008", "ISC004"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Session-scoped loop: our test_engine/real_embedder fixtures are session-scoped for
+# performance (one model load, one connection pool for the whole run). asyncpg connections
+# are bound to the event loop they were created in, so a function-scoped default loop here
+# would silently corrupt connection state across tests ("another operation is in progress").
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+markers = [
+    "integration: requires a live Postgres+pgvector database (TEST_DATABASE_URL)",
+]
