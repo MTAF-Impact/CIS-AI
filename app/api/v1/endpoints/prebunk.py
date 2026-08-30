@@ -11,10 +11,10 @@ from app.schemas.response import (
 from app.services import rag_service
 from app.services.cib_detector import detect_coordinated_behavior
 from app.services.embedding_service import EmbeddingService, get_embedding_service
-from app.services.gemini_client import (
-    GeminiClient,
-    GeminiNotConfiguredError,
-    get_gemini_client,
+from app.services.llm_client import (
+    LLMClient,
+    LLMNotConfiguredError,
+    get_llm_client,
 )
 
 router = APIRouter(prefix="/prebunk", tags=["prebunk"])
@@ -24,7 +24,7 @@ router = APIRouter(prefix="/prebunk", tags=["prebunk"])
 async def predict_prebunk(
     payload: PrebunkPredictRequest,
     db: AsyncSession = Depends(get_db),
-    gemini: GeminiClient = Depends(get_gemini_client),
+    llm: LLMClient = Depends(get_llm_client),
     embedder: EmbeddingService = Depends(get_embedding_service),
 ) -> PrebunkPredictResponse:
     """Given a policy description, predict the likely misinformation attack angle and
@@ -34,8 +34,8 @@ async def predict_prebunk(
     grounding_context = rag_service.build_grounding_context(fault_lines)
 
     try:
-        prediction = await gemini.predict_prebunk(payload.policy_description, grounding_context)
-    except GeminiNotConfiguredError as exc:
+        prediction = await llm.predict_prebunk(payload.policy_description, grounding_context)
+    except LLMNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return PrebunkPredictResponse(

@@ -6,7 +6,8 @@ climate misinformation, maps community fault lines, predicts backlash, and draft
 
 - **Framework:** FastAPI + Uvicorn, Pydantic v2
 - **DB/ORM:** SQLAlchemy 2.0 (async, `asyncpg`) against Supabase Postgres with `pgvector`
-- **LLM:** Google AI Studio `google-genai` SDK, `gemini-2.5-flash`, strict JSON `response_schema` output
+- **LLM:** OpenAI SDK (Responses API), `gpt-5.6-luna` by default (`gpt-5.4-mini` also supported),
+  strict JSON `text_format` structured output
 - **Embeddings/ML:** `sentence-transformers/all-MiniLM-L6-v2` (384-dim), scikit-learn, HDBSCAN
 - **Package manager:** [`uv`](https://docs.astral.sh/uv/)
 
@@ -14,7 +15,7 @@ climate misinformation, maps community fault lines, predicts backlash, and draft
 
 ```bash
 uv sync
-cp .env.example .env   # then fill in DATABASE_URL and GEMINI_API_KEY
+cp .env.example .env   # then fill in DATABASE_URL and OPENAI_API_KEY
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
@@ -23,23 +24,22 @@ Open http://localhost:8000/docs for interactive Swagger UI.
 ### Seed demo data
 
 Populates 4 community fault lines and 13 realistic urban-climate-policy posts, then runs the
-same pipeline production traffic triggers: embed -> classify (Gemini) -> persist -> cluster
+same pipeline production traffic triggers: embed -> classify (OpenAI) -> persist -> cluster
 into narratives -> score risk.
 
 ```bash
 uv run python scripts/seed_demo_data.py
 ```
 
-The script is resilient to a missing/rate-limited `GEMINI_API_KEY`: classification and
+The script is resilient to a missing/rate-limited `OPENAI_API_KEY`: classification and
 narrative-labeling calls fall back to safe defaults (`unknown` / truncated post text) rather
 than aborting the whole run, so embeddings + clustering + risk scoring still populate the
-database even without a live key. Gemini calls also auto-retry on `429` rate limits using the
-API's suggested backoff.
+database even without a live key. LLM calls also auto-retry on `429` rate limits using the
+API's suggested `retry-after` delay.
 
-> **Note:** Google AI Studio's free tier caps `gemini-2.5-flash` at a small number of requests
-> **per day** (not just per-minute). Seeding fires ~13-17 Gemini calls; on the free tier you may
-> see some narratives fall back to a truncated title once the daily quota is hit. Everything
-> else (embeddings, clustering, risk scoring, all non-Gemini endpoints) is unaffected.
+> **Note:** if you're on a rate-limited/free-tier key, seeding fires ~13-17 LLM calls back to
+> back; you may see some narratives fall back to a truncated title once the quota is hit.
+> Everything else (embeddings, clustering, risk scoring, all non-LLM endpoints) is unaffected.
 
 ### Docker
 
@@ -55,11 +55,11 @@ app/
 ├── api/v1/endpoints/   # ingestion, narratives, prebunk, truth_sandwich, health
 ├── core/               # config (Pydantic Settings), async SQLAlchemy engine/session
 ├── models/             # ContentItem, Narrative, FaultLine, InterventionResponse (+ enums)
-├── schemas/            # Pydantic request/response + Gemini structured-output contracts
+├── schemas/            # Pydantic request/response + LLM structured-output contracts
 └── services/
-    ├── gemini_client.py        # google-genai wrapper, strict JSON schema output
+    ├── llm_client.py           # OpenAI Responses API wrapper, strict JSON schema output
     ├── embedding_service.py    # sentence-transformers MiniLM, 384-dim
-    ├── clustering_service.py   # HDBSCAN clustering + Gemini narrative labeling
+    ├── clustering_service.py   # HDBSCAN clustering + LLM narrative labeling
     ├── risk_engine.py          # deterministic risk formula + sub-score heuristics
     ├── cib_detector.py         # deterministic coordinated-inauthentic-behavior heuristic
     ├── rag_service.py          # pgvector similarity search over fault lines (grounding)

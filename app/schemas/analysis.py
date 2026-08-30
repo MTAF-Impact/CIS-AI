@@ -4,7 +4,7 @@ from app.models.enums import ClassificationLabel, MoralFoundation
 
 
 class ContentAnalysisSchema(BaseModel):
-    """Structured output contract returned by Gemini for a single piece of content."""
+    """Structured output contract returned by OpenAI for a single piece of content."""
 
     classification: ClassificationLabel
     confidence: float = Field(ge=0.0, le=1.0)
@@ -15,14 +15,14 @@ class ContentAnalysisSchema(BaseModel):
 
 
 class NarrativeSummarySchema(BaseModel):
-    """Structured output contract returned by Gemini when labeling a content cluster."""
+    """Structured output contract returned by OpenAI when labeling a content cluster."""
 
     title: str = Field(max_length=255)
     summary: str
 
 
 class PrebunkPredictionSchema(BaseModel):
-    """Structured output contract returned by Gemini for a Prebunk attack-angle prediction."""
+    """Structured output contract returned by OpenAI for a Prebunk attack-angle prediction."""
 
     predicted_attack_angle: str
     likely_framing: str
@@ -30,7 +30,7 @@ class PrebunkPredictionSchema(BaseModel):
 
 
 class TruthSandwichSchema(BaseModel):
-    """Structured output contract returned by Gemini for a Truth Sandwich correction."""
+    """Structured output contract returned by OpenAI for a Truth Sandwich correction."""
 
     core_fact: str
     nuanced_flag: str

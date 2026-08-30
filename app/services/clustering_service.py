@@ -10,7 +10,7 @@ from app.models.content import ContentItem
 from app.models.fault_line import FaultLine
 from app.models.narrative import Narrative
 from app.services import risk_engine
-from app.services.gemini_client import GeminiClient, get_gemini_client
+from app.services.llm_client import LLMClient, get_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ async def _score_and_persist_narrative(
 
 
 async def cluster_unclustered_content(
-    db: AsyncSession, gemini: GeminiClient | None = None
+    db: AsyncSession, llm: LLMClient | None = None
 ) -> ClusterResult:
     """Cluster all not-yet-clustered ContentItems into Narratives.
 
@@ -81,7 +81,7 @@ async def cluster_unclustered_content(
     2. Cluster whatever remains with HDBSCAN and create new narratives for each cluster
        (label -1 = noise is left unclustered).
     """
-    gemini = gemini or get_gemini_client()
+    llm = llm or get_llm_client()
 
     unclustered_stmt = select(ContentItem).where(
         ContentItem.narrative_id.is_(None), ContentItem.embedding.is_not(None)
@@ -158,10 +158,10 @@ async def cluster_unclustered_content(
 
             sample_texts = [item.text for item in cluster_items[:MAX_SAMPLE_TEXTS_FOR_SUMMARY]]
             try:
-                summary = await gemini.summarize_narrative(sample_texts)
+                summary = await llm.summarize_narrative(sample_texts)
                 title, summary_text = summary.title, summary.summary
             except Exception:
-                logger.exception("Gemini narrative summarization failed; using fallback title")
+                logger.exception("OpenAI narrative summarization failed; using fallback title")
                 title = sample_texts[0][:80]
                 summary_text = None
 

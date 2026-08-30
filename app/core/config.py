@@ -21,9 +21,9 @@ class Settings(BaseSettings):
     # Database (Supabase Postgres + pgvector)
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/postgres"
 
-    # Google AI Studio / Gemini
-    GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-2.5-flash"
+    # OpenAI
+    OPENAI_API_KEY: str = ""
+    OPENAI_MODEL: str = "gpt-5.6-luna"
 
     # Embeddings
     EMBEDDING_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -32,9 +32,18 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: list[str] = Field(default_factory=lambda: ["*"])
 
+    # Logging - JSON logs are auto-enabled in production (Cloud Run/Cloud Logging reads
+    # the `severity`/`message` fields from stdout JSON directly); override either if needed.
+    LOG_LEVEL: str = "INFO"
+    LOG_JSON: bool | None = None
+
     @property
     def is_production(self) -> bool:
         return self.ENV.lower() in {"prod", "production"}
+
+    @property
+    def log_json(self) -> bool:
+        return self.is_production if self.LOG_JSON is None else self.LOG_JSON
 
 
 @lru_cache

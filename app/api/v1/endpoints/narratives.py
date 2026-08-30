@@ -18,7 +18,7 @@ from app.schemas.narrative import (
 )
 from app.services import risk_engine
 from app.services.clustering_service import cluster_unclustered_content
-from app.services.gemini_client import GeminiClient, get_gemini_client
+from app.services.llm_client import LLMClient, get_llm_client
 
 router = APIRouter(prefix="/narratives", tags=["narratives"])
 
@@ -47,10 +47,10 @@ async def list_narratives(
 @router.post("/cluster-now", response_model=ClusterNowResponse)
 async def cluster_now(
     db: AsyncSession = Depends(get_db),
-    gemini: GeminiClient = Depends(get_gemini_client),
+    llm: LLMClient = Depends(get_llm_client),
 ) -> ClusterNowResponse:
     """Trigger immediate re-clustering of any not-yet-clustered content items."""
-    result = await cluster_unclustered_content(db, gemini=gemini)
+    result = await cluster_unclustered_content(db, llm=llm)
     return ClusterNowResponse(
         narratives_created=result.narratives_created,
         narratives_updated=result.narratives_updated,

@@ -30,7 +30,7 @@ class ContentItem(Base):
     author_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     location: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    # Gemini structured analysis output
+    # OpenAI structured analysis output
     classification: Mapped[ClassificationLabel | None] = mapped_column(
         String(32), nullable=True
     )
