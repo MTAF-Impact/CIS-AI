@@ -1,5 +1,5 @@
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 
@@ -53,13 +53,13 @@ def compute_growth_velocity(
         return 0.0
     reference = now or max(timestamps)
     if reference.tzinfo is None:
-        reference = reference.replace(tzinfo=timezone.utc)
+        reference = reference.replace(tzinfo=UTC)
     cutoff = reference - timedelta(hours=window_hours)
     total = len(timestamps)
     recent = sum(
         1
         for t in timestamps
-        if (t if t.tzinfo else t.replace(tzinfo=timezone.utc)) >= cutoff
+        if (t if t.tzinfo else t.replace(tzinfo=UTC)) >= cutoff
     )
     return round(min(max(recent / total, 0.0), 1.0), 4)
 

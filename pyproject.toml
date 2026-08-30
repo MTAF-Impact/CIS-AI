@@ -35,3 +35,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+[tool.ruff.lint]
+# B008: FastAPI's Depends()/Query() default-argument pattern is idiomatic, not a bug.
+# ISC004: demo seed data intentionally wraps long literal post text across lines.
+ignore = ["B008", "ISC004"]

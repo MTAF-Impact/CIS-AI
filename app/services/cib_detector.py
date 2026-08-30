@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
@@ -19,7 +19,7 @@ PAIR_FLAG_THRESHOLD = 0.60
 
 
 def _aware(dt: datetime) -> datetime:
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 class _UnionFind:

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -14,7 +14,11 @@ from app.schemas.content import (
     ContentItemRead,
 )
 from app.services.embedding_service import EmbeddingService, get_embedding_service
-from app.services.gemini_client import GeminiClient, get_gemini_client
+from app.services.gemini_client import (
+    GeminiClient,
+    GeminiNotConfiguredError,
+    get_gemini_client,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +55,10 @@ async def ingest_content(
 ) -> ContentItem:
     """Ingest a single piece of content: embed it, classify it via Gemini, persist it."""
     embedding = await run_in_threadpool(embedder.embed, payload.text)
-    item = await _analyze_and_build_item(payload, gemini, embedding)
+    try:
+        item = await _analyze_and_build_item(payload, gemini, embedding)
+    except GeminiNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     db.add(item)
     await db.commit()
@@ -73,7 +80,7 @@ async def ingest_content_batch(
     async def _build(entry: ContentItemCreate, vec: list[float]) -> ContentItem | dict:
         try:
             return await _analyze_and_build_item(entry, gemini, vec)
-        except Exception as exc:  # noqa: BLE001 - isolate per-item failures in a batch
+        except Exception as exc:
             logger.exception("Failed to analyze content item during batch ingest")
             return {"text": entry.text, "error": str(exc)}
 
