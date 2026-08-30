@@ -6,21 +6,12 @@ from app.models.enums import ContentSource
 from app.models.narrative import Narrative
 from app.services.clustering_service import cluster_unclustered_content
 from tests.fakes import FakeLLMClient
+from tests.jakarta_fixtures import ERP_POSTS, TREE_REMOVAL_POSTS
 
 pytestmark = pytest.mark.integration
 
-BUS_LANE_POSTS = [
-    "The new bus lane is a hidden tax on working families!",
-    "This bus lane project is really just a hidden tax on drivers, wake up.",
-    "I can't believe the city snuck in a hidden tax through this bus lane plan.",
-]
-TREE_REMOVAL_POSTS = [
-    "The city is removing 500 mature trees for a parking structure, environmental betrayal.",
-    "500 trees gone for a parking lot?! Absolute hypocrisy from city council.",
-]
 
-
-async def _insert_items(db_session, real_embedder, texts):
+async def _insert_items(db_session, real_embedder, texts, location="Sudirman"):
     for text in texts:
         db_session.add(
             ContentItem(
@@ -28,7 +19,7 @@ async def _insert_items(db_session, real_embedder, texts):
                 source=ContentSource.SOCIAL,
                 embedding=real_embedder.embed(text),
                 outrage_score=0.6,
-                location="Downtown",
+                location=location,
             )
         )
     await db_session.commit()
@@ -41,8 +32,8 @@ class TestClusterUnclusteredContent:
         assert result.content_items_clustered == 0
 
     async def test_forms_distinct_narratives_by_topic(self, db_session, real_embedder):
-        await _insert_items(db_session, real_embedder, BUS_LANE_POSTS)
-        await _insert_items(db_session, real_embedder, TREE_REMOVAL_POSTS)
+        await _insert_items(db_session, real_embedder, ERP_POSTS)
+        await _insert_items(db_session, real_embedder, TREE_REMOVAL_POSTS, location="Monas")
 
         result = await cluster_unclustered_content(db_session, llm=FakeLLMClient())
 
@@ -56,7 +47,7 @@ class TestClusterUnclusteredContent:
             assert 0.0 <= narrative.overall_risk_score <= 1.0
 
     async def test_a_single_orphan_post_is_left_unclustered(self, db_session, real_embedder):
-        await _insert_items(db_session, real_embedder, BUS_LANE_POSTS[:1])
+        await _insert_items(db_session, real_embedder, ERP_POSTS[:1])
 
         result = await cluster_unclustered_content(db_session, llm=FakeLLMClient())
 
@@ -68,17 +59,17 @@ class TestClusterUnclusteredContent:
         self, db_session, real_embedder
     ):
         # HDBSCAN needs topic diversity to detect density contrast - see the comment in
-        # clustering_service.py. TREE_REMOVAL_POSTS gives the bus-lane posts something to
+        # clustering_service.py. TREE_REMOVAL_POSTS gives the ERP posts something to
         # contrast against so they reliably form a cluster on the first pass.
-        await _insert_items(db_session, real_embedder, BUS_LANE_POSTS)
-        await _insert_items(db_session, real_embedder, TREE_REMOVAL_POSTS)
+        await _insert_items(db_session, real_embedder, ERP_POSTS)
+        await _insert_items(db_session, real_embedder, TREE_REMOVAL_POSTS, location="Monas")
         first_result = await cluster_unclustered_content(db_session, llm=FakeLLMClient())
         assert first_result.narratives_created == 2
 
         await _insert_items(
             db_session,
             real_embedder,
-            ["Another hidden tax complaint about the bus lane plan surfaced today."],
+            ["Another hidden tax complaint about the ERP road pricing plan surfaced today."],
         )
         second_result = await cluster_unclustered_content(db_session, llm=FakeLLMClient())
 

@@ -1,5 +1,3 @@
-from datetime import UTC
-
 import pytest
 
 pytestmark = pytest.mark.integration
@@ -11,12 +9,15 @@ class TestPredict:
     ):
         from app.models.fault_line import FaultLine
 
-        description = "Residents distrust city hall after repeated displacement."
+        description = (
+            "Kampung Pulo residents distrust city hall after the 2015-2016 Ciliwung "
+            "normalization evictions."
+        )
         fault_line = FaultLine(
-            community_name="District X",
-            grievance_theme="Historical displacement distrust",
+            community_name="Kampung Pulo",
+            grievance_theme="Historical eviction distrust",
             description=description,
-            embedding=real_embedder.embed(f"Historical displacement distrust: {description}"),
+            embedding=real_embedder.embed(f"Historical eviction distrust: {description}"),
         )
         db_session.add(fault_line)
         await db_session.commit()
@@ -24,15 +25,18 @@ class TestPredict:
         response = await client.post(
             "/api/v1/prebunk/predict",
             json={
-                "policy_title": "District X Housing Redevelopment",
-                "policy_description": "The city will renovate public housing in District X with no planned displacement.",
+                "policy_title": "Kampung Pulo Housing Redevelopment",
+                "policy_description": (
+                    "The city will renovate public housing in Kampung Pulo along the "
+                    "Ciliwung riverbank with no planned displacement."
+                ),
             },
         )
 
         assert response.status_code == 200
         body = response.json()
         assert body["predicted_attack_angle"]
-        assert "District X" in body["grounding_sources"]
+        assert "Kampung Pulo" in body["grounding_sources"]
 
     async def test_predict_rejects_empty_policy_description(self, client):
         response = await client.post(
@@ -43,7 +47,7 @@ class TestPredict:
 
 class TestCheckCIB:
     async def test_check_cib_flags_a_coordinated_pair_via_http(self, client):
-        from datetime import datetime, timedelta
+        from datetime import UTC, datetime, timedelta
 
         now = datetime.now(UTC)
         account_created = (now - timedelta(days=2)).isoformat()
@@ -54,14 +58,14 @@ class TestCheckCIB:
                 "posts": [
                     {
                         "id": "1",
-                        "text": "The new bus lane is a hidden tax on working families!",
+                        "text": "The new ERP congestion charge is a hidden tax on working families!",
                         "author_id": "botA",
                         "created_at": now.isoformat(),
                         "account_created_at": account_created,
                     },
                     {
                         "id": "2",
-                        "text": "This bus lane is really just a hidden tax on working families!!",
+                        "text": "This ERP congestion charge is really just a hidden tax on working families!!",
                         "author_id": "botB",
                         "created_at": (now + timedelta(minutes=2)).isoformat(),
                         "account_created_at": (

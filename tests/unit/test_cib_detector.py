@@ -27,14 +27,14 @@ class TestDetectCoordinatedBehavior:
         posts = [
             _post(
                 "1",
-                "The new bus lane policy is a hidden tax on working families!",
+                "The new ERP road pricing policy is a hidden tax on working families!",
                 "botA",
                 now,
                 account_created,
             ),
             _post(
                 "2",
-                "This bus lane policy is really just a hidden tax on working families!!",
+                "This ERP road pricing policy is really just a hidden tax on working families!!",
                 "botB",
                 now + timedelta(minutes=2),
                 account_created + timedelta(minutes=10),
@@ -91,13 +91,13 @@ class TestDetectCoordinatedBehavior:
         posts = [
             _post(
                 "1",
-                "The new bus lane policy is a hidden tax on working families!",
+                "The new ERP road pricing policy is a hidden tax on working families!",
                 "userA",
                 now,
             ),
             _post(
                 "2",
-                "This bus lane policy is really just a hidden tax on working families!!",
+                "This ERP road pricing policy is really just a hidden tax on working families!!",
                 "userB",
                 now - timedelta(days=3),
             ),

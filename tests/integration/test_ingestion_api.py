@@ -14,14 +14,14 @@ class TestIngestSingle:
                 "text": "The city council is secretly planning a hidden tax on drivers.",
                 "source": "social",
                 "author_id": "user_1",
-                "location": "Downtown",
+                "location": "Sudirman",
             },
         )
 
         assert response.status_code == 201
         body = response.json()
         assert body["classification"] == "misinformation"  # FakeLLMClient keyword match
-        assert body["location"] == "Downtown"
+        assert body["location"] == "Sudirman"
         assert body["narrative_id"] is None
 
         row = (
@@ -41,8 +41,8 @@ class TestIngestBatch:
             "/api/v1/ingest/batch",
             json={
                 "items": [
-                    {"text": "First post about the bus lane.", "source": "social"},
-                    {"text": "Second post about the tree removal.", "source": "forum"},
+                    {"text": "First post about the ERP road pricing plan.", "source": "social"},
+                    {"text": "Second post about MRT tree removal near Monas.", "source": "forum"},
                 ]
             },
         )
