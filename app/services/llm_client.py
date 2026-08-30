@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from functools import lru_cache
 from typing import TypeVar
 
@@ -8,11 +9,15 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.models.enums import Stance
 from app.schemas.analysis import (
+    ClaimSummarySchema,
     ContentAnalysisSchema,
-    NarrativeSummarySchema,
-    PrebunkPredictionSchema,
-    TruthSandwichSchema,
+    DebunkContentSchema,
+    HarmClassificationSchema,
+    NonExistingClaimPredictionSchema,
+    StanceBatchSchema,
+    StanceSchema,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,10 +30,16 @@ DEFAULT_RATE_LIMIT_RETRY_SECONDS = 15.0
 # These 429 error codes mean "this key cannot succeed no matter how long you wait" -
 # retrying wastes ~45s (3 retries) before failing anyway, so fail fast instead.
 NON_RETRYABLE_RATE_LIMIT_CODES = frozenset({"insufficient_quota", "credit_balance_exhausted"})
+_RETRY_DELAY_PATTERN = re.compile(r"retry in ([\d.]+)s", re.IGNORECASE)
 
 
 class LLMNotConfiguredError(RuntimeError):
     """Raised when an LLM call is attempted without a configured OPENAI_API_KEY."""
+
+
+class StanceCountMismatchError(ValueError):
+    """Raised when a batch stance classification returns a different number of
+    stances than input texts - the caller cannot safely zip a misaligned result."""
 
 
 def _extract_retry_delay_seconds(exc: openai.RateLimitError) -> float:
@@ -38,7 +49,8 @@ def _extract_retry_delay_seconds(exc: openai.RateLimitError) -> float:
             return float(retry_after) + 1.0
         except ValueError:
             pass
-    return DEFAULT_RATE_LIMIT_RETRY_SECONDS
+    match = _RETRY_DELAY_PATTERN.search(str(exc))
+    return float(match.group(1)) + 1.0 if match else DEFAULT_RATE_LIMIT_RETRY_SECONDS
 
 
 CONTENT_ANALYSIS_SYSTEM_PROMPT = """\
@@ -48,12 +60,6 @@ transcript excerpt) about local climate/urban policy, analyze it strictly and re
 ONLY the requested JSON fields.
 
 Guidance:
-- classification: "misinformation" = false factual claim stated as true without clear \
-  intent to deceive; "disinformation" = false claim with signs of deliberate, \
-  coordinated intent to mislead; "legitimate_debate" = an opinion, value judgment, or \
-  contestable-but-not-factually-false claim; "satire" = clearly exaggerated/comedic; \
-  "unknown" = not enough information to classify.
-- confidence: your confidence (0.0-1.0) in the classification above.
 - outrage_score: emotional intensity / outrage expressed in the text (0.0 = calm/neutral, \
   1.0 = extreme outrage, fear, or anger).
 - moral_foundation: the single dominant Moral Foundations Theory dimension driving the \
@@ -66,10 +72,68 @@ Guidance:
   in one short phrase.
 """
 
-TRUTH_SANDWICH_SYSTEM_PROMPT = """\
-You are drafting a "Truth Sandwich" correction for a civic communications team, using \
-neuroscience-backed structure: Core Fact -> Brief Neutral Misinformation Flag -> \
-Re-stated Verified Fact.
+CLAIM_SUMMARY_SYSTEM_PROMPT = """\
+You are labeling a cluster of related public posts about a local climate/urban policy \
+topic for a government decision-support dashboard (a "Claim Repository Bank").
+
+Given a sample of posts that all express the same underlying claim, produce:
+- claim_statement: ONE neutral, declarative sentence stating the claim these posts are \
+  collectively making. Synthesize this fresh from the pattern across all the sample \
+  posts - do not just copy or lightly reword a single post.
+- topic_label: a short (2-5 word) label for the broader subject-matter category this \
+  claim belongs to (e.g. "Road Pricing & Transit", "Flooding & Waterways", "Waste & \
+  Pollution"). This will be used to match against existing topic labels, so keep it \
+  general enough to plausibly cover other related claims, not hyper-specific to this \
+  one claim.
+"""
+
+STANCE_SYSTEM_PROMPT = """\
+You are classifying a single post's stance toward a specific claim, for a civic \
+decision-support system tracking misinformation spread and organic public pushback.
+
+Given the claim statement and one post, classify the post's stance as exactly one of:
+- "supporting": the post agrees with, spreads, or repeats the claim.
+- "opposing": the post disputes, corrects, mocks, or pushes back against the claim.
+- "neutral": the post mentions the claim's topic without clearly taking a position \
+  either way.
+Base this ONLY on the post's relationship to the given claim, not on the post's general \
+tone.
+"""
+
+STANCE_BATCH_SYSTEM_PROMPT = """\
+You are classifying multiple posts' stances toward a single specific claim, for a civic \
+decision-support system tracking misinformation spread and organic public pushback.
+
+Given the claim statement and a numbered list of posts, classify EACH post's stance as \
+exactly one of "supporting", "opposing", or "neutral" (same definitions as single-post \
+classification). Return the stances list in EXACTLY the same order as the numbered \
+posts - one stance per post, same count as posts given.
+"""
+
+HARM_CLASSIFICATION_SYSTEM_PROMPT = """\
+You are assessing the potential real-world harm of a false or misleading claim for a \
+city government risk-triage system, BEFORE a human reviewer confirms your assessment.
+
+Score each dimension 0-100:
+- public_safety: risk of physical harm, panic, or dangerous behavior resulting from the \
+  claim (e.g. false hazard/evacuation information). 0 = no safety risk, 100 = severe.
+- institutional_trust: the claim's potential to erode public trust in government \
+  competence or intent, independent of any single policy. 0 = none, 100 = severe.
+- economic: potential financial harm (e.g. property value panic, business impact, \
+  market disruption). 0 = none, 100 = severe.
+- policy_disruption: how much the claim undermines a specific active policy rollout. \
+  Score this conservatively and narrowly - only the claim's effect on policy execution, \
+  NOT general criticism or disagreement with the policy itself. A claim that is simply \
+  unflattering to a policy is not automatically high on this dimension; only score high \
+  if the claim would concretely obstruct or derail implementation (e.g. inciting active \
+  boycotts/interference), since a government tool must not treat ordinary criticism of \
+  its own policy as "harm".
+"""
+
+DEBUNK_CONTENT_SYSTEM_PROMPT = """\
+You are drafting the Debunk Activity for a claim in a civic communications team's Claim \
+Repository Bank, using the neuroscience-backed "Truth Sandwich" structure: Core Fact -> \
+Brief Neutral Misinformation Flag -> Re-stated Verified Fact.
 
 Strict rules:
 1. Ground every factual claim ONLY in the provided policy/reference context. Never \
@@ -85,12 +149,18 @@ Strict rules:
 5. Keep tone calm, neutral, non-partisan, and non-condescending.
 """
 
-PREBUNK_SYSTEM_PROMPT = """\
+NON_EXISTING_CLAIM_PREDICTION_SYSTEM_PROMPT = """\
 You are a strategic communications analyst helping a city government anticipate \
-misinformation before it spreads, ahead of an upcoming climate/urban policy announcement.
+misinformation before it spreads, ahead of an upcoming climate/urban policy announcement. \
+This claim has NOT appeared in public discourse yet - you are predicting what is likely \
+to emerge, for the Claim Repository Bank's Non-Existing (predicted) claims queue.
 
 Given a description of the policy and relevant grounding context (past grievances, \
-fault lines, similar precedents), predict:
+fault lines, similar precedents), produce:
+- claim_statement: ONE neutral, declarative sentence stating the specific false or \
+  misleading claim you predict is most likely to emerge and circulate about this policy.
+- topic_label: a short (2-5 word) label for the broader subject-matter category this \
+  predicted claim belongs to, matching the style used for existing claims' topics.
 - predicted_attack_angle: the single most likely misinformation/disinformation attack \
   angle opponents or bad-faith actors will use against this policy.
 - likely_framing: the emotional/rhetorical framing they will likely use (e.g. "government \
@@ -98,14 +168,8 @@ fault lines, similar precedents), predict:
 - inoculation_explainer: a short, plain-language explainer (2-4 sentences) that can be \
   published BEFORE the attack spreads, to pre-bunk it: grounded strictly in the provided \
   policy context, calm in tone, and addressing the likely concern head-on without \
-  repeating inflammatory false framing.
-"""
-
-NARRATIVE_SUMMARY_SYSTEM_PROMPT = """\
-You are labeling a cluster of related public posts about a local climate/urban policy \
-topic for a decision-support dashboard. Given a sample of posts from the same cluster, \
-produce a short, neutral, descriptive title (under 10 words) and a 1-3 sentence summary \
-of what this narrative is about and why people are engaging with it.
+  repeating inflammatory false framing. This becomes the claim's Prebunk Activity - the \
+  actual publishable content.
 """
 
 
@@ -170,7 +234,7 @@ class LLMClient:
         return response.output_parsed
 
     async def analyze_content(self, text: str) -> ContentAnalysisSchema:
-        """Classify a piece of content, score outrage, and extract claim/grievance."""
+        """Ingestion-time analysis: outrage, moral foundation, extracted claim/grievance."""
         prompt = f"Content to analyze:\n\n{text}"
         return await self._generate_structured(
             prompt=prompt,
@@ -178,43 +242,90 @@ class LLMClient:
             schema=ContentAnalysisSchema,
         )
 
-    async def summarize_narrative(self, sample_texts: list[str]) -> NarrativeSummarySchema:
-        """Generate a concise title + summary for a cluster of related content items."""
+    async def summarize_claim(self, sample_texts: list[str]) -> ClaimSummarySchema:
+        """Synthesize a claim_statement + candidate topic_label from a new cluster."""
         joined = "\n---\n".join(sample_texts[:20])
         prompt = f"Sample posts from this cluster:\n\n{joined}"
         return await self._generate_structured(
             prompt=prompt,
-            system_instruction=NARRATIVE_SUMMARY_SYSTEM_PROMPT,
-            schema=NarrativeSummarySchema,
+            system_instruction=CLAIM_SUMMARY_SYSTEM_PROMPT,
+            schema=ClaimSummarySchema,
         )
 
-    async def predict_prebunk(
-        self, policy_description: str, grounding_context: str
-    ) -> PrebunkPredictionSchema:
-        """Predict the likely misinformation attack angle against a policy and draft a prebunk."""
+    async def classify_stance(self, claim_statement: str, post_text: str) -> Stance:
+        """Classify a single post's stance toward an already-known claim (used when a
+        post attaches to an EXISTING claim - see clustering_service Pass 1)."""
+        prompt = f"Claim statement:\n{claim_statement}\n\nPost:\n{post_text}"
+        result = await self._generate_structured(
+            prompt=prompt,
+            system_instruction=STANCE_SYSTEM_PROMPT,
+            schema=StanceSchema,
+        )
+        return result.stance
+
+    async def classify_stances_batch(
+        self, claim_statement: str, texts: list[str]
+    ) -> list[Stance]:
+        """Classify stance for every post in a newly-formed cluster in one call (bounds
+        LLM-call growth vs. one call per post - mirrors embed_batch's batching intent).
+        Raises StanceCountMismatchError if the model returns a different count than
+        given - the caller must not silently zip a misaligned result."""
+        numbered = "\n".join(f"{i + 1}. {text}" for i, text in enumerate(texts))
+        prompt = f"Claim statement:\n{claim_statement}\n\nPosts:\n{numbered}"
+        result = await self._generate_structured(
+            prompt=prompt,
+            system_instruction=STANCE_BATCH_SYSTEM_PROMPT,
+            schema=StanceBatchSchema,
+        )
+        if len(result.stances) != len(texts):
+            raise StanceCountMismatchError(
+                f"Expected {len(texts)} stances, got {len(result.stances)}"
+            )
+        return result.stances
+
+    async def classify_harm(
+        self, claim_statement: str, sample_supporting_texts: list[str]
+    ) -> HarmClassificationSchema:
+        """AI-classify Harm Severity (H) sub-components. harm_human_confirmed stays
+        False on the Claim until a human reviewer confirms via PATCH /claims/{id}/harm/confirm."""
+        joined = "\n---\n".join(sample_supporting_texts[:10])
+        prompt = f"Claim statement:\n{claim_statement}\n\nSample supporting posts:\n{joined}"
+        return await self._generate_structured(
+            prompt=prompt,
+            system_instruction=HARM_CLASSIFICATION_SYSTEM_PROMPT,
+            schema=HarmClassificationSchema,
+        )
+
+    async def generate_debunk(
+        self, claim_statement: str, grounding_context: str
+    ) -> DebunkContentSchema:
+        """Draft the structured Truth Sandwich content for an EXISTING claim's Debunk
+        Activity, grounded strictly in the provided context."""
         prompt = (
+            f"Claim being debunked (for context only - do not quote verbatim in the flag):\n"
+            f"{claim_statement}\n\n"
+            f"Grounded reference/policy context:\n{grounding_context or 'None provided.'}"
+        )
+        return await self._generate_structured(
+            prompt=prompt,
+            system_instruction=DEBUNK_CONTENT_SYSTEM_PROMPT,
+            schema=DebunkContentSchema,
+        )
+
+    async def predict_non_existing_claim(
+        self, policy_title: str, policy_description: str, grounding_context: str
+    ) -> NonExistingClaimPredictionSchema:
+        """Predict a NON_EXISTING claim ahead of a policy announcement: the predicted
+        claim statement, topic, and Prebunk Activity content."""
+        prompt = (
+            f"Policy title: {policy_title}\n"
             f"Policy description:\n{policy_description}\n\n"
             f"Grounding context (fault lines / precedents):\n{grounding_context or 'None provided.'}"
         )
         return await self._generate_structured(
             prompt=prompt,
-            system_instruction=PREBUNK_SYSTEM_PROMPT,
-            schema=PrebunkPredictionSchema,
-        )
-
-    async def generate_truth_sandwich(
-        self, viral_claim_summary: str, grounding_context: str
-    ) -> TruthSandwichSchema:
-        """Draft a structured Truth Sandwich correction grounded in provided policy text."""
-        prompt = (
-            f"Circulating claim (for context only - do not quote verbatim in the flag):\n"
-            f"{viral_claim_summary}\n\n"
-            f"Grounded reference/policy context:\n{grounding_context or 'None provided.'}"
-        )
-        return await self._generate_structured(
-            prompt=prompt,
-            system_instruction=TRUTH_SANDWICH_SYSTEM_PROMPT,
-            schema=TruthSandwichSchema,
+            system_instruction=NON_EXISTING_CLAIM_PREDICTION_SYSTEM_PROMPT,
+            schema=NonExistingClaimPredictionSchema,
         )
 
 

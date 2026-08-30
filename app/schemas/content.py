@@ -3,7 +3,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import ClassificationLabel, ContentSource, MoralFoundation
+from app.models.enums import ContentSource, MoralFoundation, Stance
 
 
 class ContentItemCreate(BaseModel):
@@ -11,6 +11,11 @@ class ContentItemCreate(BaseModel):
     source: ContentSource = ContentSource.OTHER
     author_id: str | None = None
     location: str | None = None
+    # Optional raw metrics for Reach (R) / Emotional Intensity (EI) scoring - populated
+    # by whatever upstream source feeds this API; default null when absent.
+    impressions: int | None = None
+    positive_reaction_count: int | None = None
+    negative_reaction_count: int | None = None
 
 
 class ContentItemBatchCreate(BaseModel):
@@ -25,13 +30,15 @@ class ContentItemRead(BaseModel):
     source: ContentSource
     author_id: str | None
     location: str | None
-    classification: ClassificationLabel | None
-    confidence: float | None
     outrage_score: float | None
     moral_foundation: MoralFoundation | None
     extracted_claim: str | None
     underlying_grievance: str | None
-    narrative_id: uuid.UUID | None
+    stance: Stance | None
+    impressions: int | None
+    positive_reaction_count: int | None
+    negative_reaction_count: int | None
+    claim_id: uuid.UUID | None
     created_at: datetime
 
 

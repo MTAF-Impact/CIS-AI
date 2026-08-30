@@ -26,12 +26,16 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-import app.models
+import app.models  # noqa: F401 - registers all ORM models on Base.metadata
 from app.core.database import Base, get_db
-from app.main import app
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.llm_client import get_llm_client
 from tests.fakes import FakeLLMClient
+
+# `app.main` (and everything it transitively imports - the full API/schema layer) is
+# imported lazily inside the `client` fixture rather than at module top. This lets pure
+# unit tests and DB-only integration tests (which use `db_session` but not `client`)
+# collect and run even while the API/schema layer is mid-rewrite in a staged rearchitecture.
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/postgres"
@@ -85,6 +89,8 @@ async def client(
     fixture dependency here purely so its post-test truncation cleanup still runs; tests
     use it directly only for setup/assertions against the same underlying database.
     """
+    from app.main import app  # lazy - see module docstring/comment above
+
     request_session_maker = async_sessionmaker(bind=test_engine, expire_on_commit=False)
 
     async def _override_get_db() -> AsyncGenerator[AsyncSession, None]:
