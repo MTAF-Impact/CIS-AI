@@ -23,9 +23,12 @@ Open http://localhost:8000/docs for interactive Swagger UI.
 
 ### Seed demo data
 
-Populates 4 community fault lines and 13 realistic urban-climate-policy posts, then runs the
-same pipeline production traffic triggers: embed -> classify (OpenAI) -> persist -> cluster
-into narratives -> score risk.
+Populates 4 real Jakarta community fault lines (Kampung Pulo eviction distrust, Penjaringan
+tidal flooding, Muara Angke reclamation distrust, Sunter waste-plant pollution distrust) and
+13 realistic posts across 4 emerging narratives grounded in actual Jakarta policies - ERP
+road pricing, MRT Fase 2 tree removal, the ITF Sunter waste-to-energy plant, and Ciliwung
+flood-control budget debate. Then runs the same pipeline production traffic triggers:
+embed -> classify (OpenAI) -> persist -> cluster into narratives -> score risk.
 
 ```bash
 uv run python scripts/seed_demo_data.py
@@ -139,18 +142,18 @@ curl http://localhost:8000/api/v1/health
 curl -X POST http://localhost:8000/api/v1/ingest \
   -H "Content-Type: application/json" \
   -d '{
-        "text": "The new bus lane is a hidden tax on working families!",
+        "text": "The new ERP congestion charge on Sudirman is a hidden tax on working families!",
         "source": "social",
         "author_id": "user_123",
-        "location": "Downtown"
+        "location": "Sudirman"
       }'
 
 curl -X POST http://localhost:8000/api/v1/ingest/batch \
   -H "Content-Type: application/json" \
   -d '{
         "items": [
-          {"text": "First post text...", "source": "social", "location": "Downtown"},
-          {"text": "Second post text...", "source": "forum", "location": "Riverside"}
+          {"text": "First post text...", "source": "social", "location": "Sudirman"},
+          {"text": "Second post text...", "source": "forum", "location": "Kampung Pulo"}
         ]
       }'
 ```
@@ -170,16 +173,16 @@ curl -X POST http://localhost:8000/api/v1/narratives/cluster-now
 curl -X POST http://localhost:8000/api/v1/prebunk/predict \
   -H "Content-Type: application/json" \
   -d '{
-        "policy_title": "Downtown Bus Lane Expansion",
-        "policy_description": "The city will add a dedicated bus lane on 5th Ave to cut commute times, funded by the existing transit budget with no new fees planned."
+        "policy_title": "Kampung Pulo Housing Redevelopment",
+        "policy_description": "The city will renovate public housing in Kampung Pulo along the Ciliwung riverbank, funded by the existing housing budget with no planned displacement."
       }'
 
 curl -X POST http://localhost:8000/api/v1/prebunk/check-cib \
   -H "Content-Type: application/json" \
   -d '{
         "posts": [
-          {"id": "1", "text": "This bus lane is a hidden tax on working families!", "author_id": "botA", "created_at": "2026-08-30T12:00:00Z", "account_created_at": "2026-08-28T00:00:00Z"},
-          {"id": "2", "text": "This bus lane is really just a hidden tax on working families!!", "author_id": "botB", "created_at": "2026-08-30T12:02:00Z", "account_created_at": "2026-08-28T00:10:00Z"},
+          {"id": "1", "text": "This ERP congestion charge is a hidden tax on working families!", "author_id": "botA", "created_at": "2026-08-30T12:00:00Z", "account_created_at": "2026-08-28T00:00:00Z"},
+          {"id": "2", "text": "This ERP congestion charge is really just a hidden tax on working families!!", "author_id": "botB", "created_at": "2026-08-30T12:02:00Z", "account_created_at": "2026-08-28T00:10:00Z"},
           {"id": "3", "text": "I like the new park, my kids enjoyed it this weekend", "author_id": "realuser", "created_at": "2026-08-30T07:00:00Z", "account_created_at": "2020-01-01T00:00:00Z"}
         ]
       }'

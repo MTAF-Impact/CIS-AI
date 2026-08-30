@@ -10,20 +10,21 @@ pytestmark = pytest.mark.integration
 
 
 async def _make_narrative(db_session, real_embedder) -> Narrative:
-    narrative = Narrative(title="Bus Lane Congestion Charge Fears", summary="Test narrative summary")
+    narrative = Narrative(title="ERP Congestion Charge Fears", summary="Test narrative summary")
     db_session.add(narrative)
     await db_session.flush()
 
     item = ContentItem(
-        text="The city is secretly planning a hidden tax via the new bus lane.",
+        text="The city is secretly planning a hidden tax via the new ERP gantries.",
         source=ContentSource.SOCIAL,
+        location="Sudirman",
         classification=ClassificationLabel.MISINFORMATION,
         confidence=0.9,
         outrage_score=0.7,
         moral_foundation=MoralFoundation.FAIRNESS,
-        extracted_claim="The bus lane is secretly a congestion charge.",
+        extracted_claim="The ERP rollout is secretly a full congestion charge.",
         underlying_grievance="cost-of-living anxiety",
-        embedding=real_embedder.embed("hidden tax bus lane"),
+        embedding=real_embedder.embed("hidden tax ERP congestion charge Sudirman"),
         narrative_id=narrative.id,
     )
     db_session.add(item)

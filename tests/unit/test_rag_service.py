@@ -11,20 +11,20 @@ class TestBuildGroundingContext:
         assert build_grounding_context([]) == ""
 
     def test_renders_community_and_theme(self):
-        context = build_grounding_context([_fault_line("North Ward", "Flooding neglect")])
-        assert "North Ward" in context
-        assert "Flooding neglect" in context
+        context = build_grounding_context([_fault_line("Penjaringan", "Tidal flooding neglect")])
+        assert "Penjaringan" in context
+        assert "Tidal flooding neglect" in context
 
     def test_includes_description_when_present(self):
         context = build_grounding_context(
-            [_fault_line("North Ward", "Flooding neglect", "Flooded three times in five years.")]
+            [_fault_line("Penjaringan", "Tidal flooding neglect", "Flooded three times in five years.")]
         )
         assert "Flooded three times in five years." in context
 
     def test_omits_description_when_absent(self):
-        context = build_grounding_context([_fault_line("North Ward", "Flooding neglect")])
+        context = build_grounding_context([_fault_line("Penjaringan", "Tidal flooding neglect")])
         assert "None" not in context
-        assert context.strip() == "- [North Ward] Flooding neglect"
+        assert context.strip() == "- [Penjaringan] Tidal flooding neglect"
 
     def test_appends_extra_notes(self):
         context = build_grounding_context([], extra_notes="policy budget is $2M")

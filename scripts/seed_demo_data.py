@@ -1,10 +1,19 @@
-"""Seed the CIS AI Service with realistic demo data for the hackathon walkthrough.
+"""Seed the CIS AI Service with realistic Jakarta demo data for the hackathon walkthrough.
 
 Populates:
-  - 4 community Fault Lines (historical grievances used for RAG grounding / risk scoring)
-  - 13 realistic urban-climate-policy posts across 4 emerging narratives
+  - 4 community Fault Lines (real Jakarta historical grievances used for RAG grounding /
+    risk scoring)
+  - 13 realistic urban-climate-policy posts across 4 emerging narratives, grounded in
+    actual Jakarta policies and places (ERP road pricing, MRT Fase 2 tree removal, ITF
+    Sunter waste-to-energy plant, Ciliwung flood-control budget)
 Then runs the same pipeline production traffic would trigger: embed -> classify (OpenAI)
 -> persist -> cluster into Narratives -> score risk.
+
+Note: post text is kept in English on purpose even though this is Jakarta data - the
+embedding model (sentence-transformers/all-MiniLM-L6-v2) is English-only, so English text
+with real Jakarta place/policy names gives the most reliable clustering. Swap to a
+multilingual embedding model (e.g. paraphrase-multilingual-MiniLM-L12-v2, also 384-dim) if
+Bahasa Indonesia post text is needed later.
 
 Usage:
     uv run python scripts/seed_demo_data.py
@@ -42,156 +51,162 @@ def _hours_ago(hours: float) -> datetime:
 
 DEMO_FAULT_LINES = [
     {
-        "community_name": "District X",
-        "grievance_theme": "Historical displacement distrust",
+        "community_name": "Kampung Pulo",
+        "grievance_theme": "Historical eviction distrust (Ciliwung normalization)",
         "description": (
-            "Residents of District X were displaced twice in the last 20 years by "
-            "infrastructure projects with little compensation or consultation. Any new "
-            "city project touching housing, transit, or land use is viewed through this "
-            "lens of distrust toward city hall."
+            "Kampung Pulo and Bukit Duri residents were forcibly evicted in 2015-2016 for "
+            "the Ciliwung river normalization project, many without adequate compensation "
+            "or resettlement. Any new city project touching the riverbanks, housing, or "
+            "flood infrastructure is viewed through this lens of deep distrust toward city "
+            "hall."
         ),
     },
     {
-        "community_name": "North Ward",
-        "grievance_theme": "Flooding infrastructure neglect",
+        "community_name": "Penjaringan",
+        "grievance_theme": "Land subsidence and tidal flooding (rob) neglect",
         "description": (
-            "North Ward has flooded three times in five years while requests for storm "
-            "drain upgrades went unfunded. Residents believe the city prioritizes "
-            "wealthier wards for infrastructure spending."
+            "North Jakarta, including Penjaringan and Muara Baru, is sinking up to 25cm a "
+            "year in places, causing chronic tidal flooding (banjir rob). Residents feel "
+            "the promised giant sea wall (NCICD) has moved too slowly while wealthier "
+            "areas get faster infrastructure investment."
         ),
     },
     {
-        "community_name": "Riverside",
-        "grievance_theme": "Cost-of-living and gentrification anxiety",
+        "community_name": "Muara Angke",
+        "grievance_theme": "Land reclamation (reklamasi) distrust",
         "description": (
-            "Riverside has seen rents rise sharply after recent green-space and transit "
-            "investment, which residents associate with displacement of longtime "
-            "working-class tenants rather than genuine environmental benefit."
+            "Fishing communities in Muara Angke fought the Jakarta Bay reclamation project "
+            "for years, fearing loss of livelihood and worsened flooding. Even after parts "
+            "of the project were halted, residents remain deeply skeptical of any coastal "
+            "or waterfront development framed as environmental improvement."
         ),
     },
     {
-        "community_name": "Eastgate",
-        "grievance_theme": "Industrial pollution and health distrust",
+        "community_name": "Sunter",
+        "grievance_theme": "Industrial waste and air pollution distrust",
         "description": (
-            "Eastgate sits next to a former industrial corridor with a documented history "
-            "of unreported chemical spills. Residents are highly sensitive to any claim "
-            "involving toxic emissions, fires, or waste processing near their homes."
+            "Residents near the ITF Sunter waste-to-energy incinerator project are highly "
+            "sensitive to any claim involving toxic emissions, fires, or waste processing, "
+            "given the plant's history of delays, cost overruns, and disputed emissions "
+            "data."
         ),
     },
 ]
 
 # (text, source, author_id, location, hours_ago)
 DEMO_POSTS: list[tuple[str, ContentSource, str, str, float]] = [
-    # --- Narrative A: Bus lane / congestion charge backlash (Downtown, District X) ---
+    # --- Narrative A: ERP (Electronic Road Pricing) backlash (Sudirman-Thamrin corridor) ---
     (
-        "New downtown bus lane is just a backdoor way to bring in a congestion charge "
-        "next year, watch what happens to our commute costs.",
+        "The new ERP gantries on Sudirman are just a backdoor way to bring in a full "
+        "congestion charge next year, watch what happens to our commute costs.",
         ContentSource.SOCIAL,
-        "user_marco",
-        "Downtown",
+        "user_budi_s",
+        "Sudirman",
         3.0,
     ),
     (
-        "Heard the city is planning a $50/day congestion charge once the bus lane is "
-        "finished. Nobody voted for this, they're just sneaking it in.",
+        "Heard the city is planning a Rp50,000/day ERP charge once the pilot on Thamrin "
+        "ends. Nobody voted for this, they're just sneaking it in.",
         ContentSource.SOCIAL,
-        "user_priya",
-        "Downtown",
+        "user_prita_w",
+        "Thamrin",
         2.5,
     ),
     (
-        "So the bus lane project is basically a hidden tax on working families who still "
-        "need to drive to their jobs across town.",
+        "So the ERP rollout is basically a hidden tax on commuters who still need to drive "
+        "into the CBD for work every day.",
         ContentSource.FORUM,
-        "user_deshawn",
-        "District X",
+        "user_dedi_k",
+        "Blok M",
         1.0,
     ),
     (
-        "Reminder: after the bus lane opened on 5th Ave last year, the city added paid "
-        "parking meters within six months. History repeating itself.",
+        "Reminder: after the busway lane expanded on Sudirman last year, the city added "
+        "paid parking meters within six months. History repeating itself with this ERP "
+        "plan.",
         ContentSource.SOCIAL,
-        "user_ana_t",
-        "District X",
+        "user_ani_t",
+        "Sudirman",
         0.5,
     ),
     (
-        "I get why people are nervous about the bus lane given what happened with the "
-        "5th Ave meters, but has the city actually confirmed a congestion charge is "
+        "I get why people are nervous about ERP given what happened with the Sudirman "
+        "parking meters, but has the city actually confirmed a full congestion charge is "
         "planned, or is this speculation?",
         ContentSource.FORUM,
-        "user_kwame",
-        "Downtown",
+        "user_kevin_h",
+        "Thamrin",
         0.25,
     ),
-    # --- Narrative B: Tree removal backlash (Riverside) ---
+    # --- Narrative B: MRT Fase 2 tree removal backlash (Kota Tua / Monas corridor) ---
     (
-        "City quietly approved removing 500 mature trees along the riverside corridor "
-        "for a new parking structure. This is an environmental betrayal.",
+        "City quietly approved removing dozens of mature trees along the MRT Fase 2 route "
+        "near Monas for construction staging. This is an environmental betrayal.",
         ContentSource.SOCIAL,
-        "user_lena_g",
-        "Riverside",
+        "user_lina_g",
+        "Monas",
         6.0,
     ),
     (
-        "500 trees gone for a parking lot?! And they call this a 'climate resilience' "
-        "plan? Absolute hypocrisy from city council.",
+        "Trees gone for MRT construction staging areas?! And they call this a green "
+        "transit project? Absolute hypocrisy from the city.",
         ContentSource.SOCIAL,
-        "user_oliver_p",
-        "Riverside",
+        "user_oscar_p",
+        "Monas",
         5.5,
     ),
     (
-        "The riverside tree removal is the same playbook as the last redevelopment: "
-        "green branding while actually displacing longtime residents and green space.",
+        "The Kota Tua tree removal is the same playbook as the last redevelopment: green "
+        "branding while actually clearing heritage streetscape for construction "
+        "convenience.",
         ContentSource.FORUM,
-        "user_sofia_m",
-        "Riverside",
+        "user_sari_m",
+        "Kota Tua",
         5.0,
     ),
-    # --- Narrative C: Recycling plant fire claims (Eastgate) ---
+    # --- Narrative C: ITF Sunter waste plant fire claims (Sunter / Cakung) ---
     (
-        "Sources say the recycling plant fire last week released toxic smoke and the "
-        "city is covering it up to avoid a lawsuit. Check your air quality apps.",
+        "Sources say the ITF Sunter waste plant test-burn last week released toxic smoke "
+        "and the city is covering it up to avoid a lawsuit. Check your air quality apps.",
         ContentSource.SOCIAL,
-        "user_ray_h",
-        "Eastgate",
+        "user_reza_h",
+        "Sunter",
         10.0,
     ),
     (
-        "They're saying the Eastgate recycling fire was 'minor' but three of my "
-        "neighbors had breathing problems that night. Nobody believes the official line "
-        "here anymore.",
+        "They're saying the Sunter incinerator test was 'minor' but three of my neighbors "
+        "had breathing problems that night. Nobody believes the official line here "
+        "anymore.",
         ContentSource.SOCIAL,
-        "user_tanya_b",
-        "Eastgate",
+        "user_tania_b",
+        "Sunter",
         9.0,
     ),
     (
-        "Can anyone confirm if the fire department actually tested air quality after "
-        "the Eastgate recycling fire, or are we just going off rumors at this point?",
+        "Can anyone confirm if the environment agency actually tested air quality after "
+        "the ITF Sunter test-burn, or are we just going off rumors at this point?",
         ContentSource.FORUM,
-        "user_devon_l",
-        "Eastgate",
+        "user_devan_l",
+        "Cakung",
         8.5,
     ),
-    # --- Narrative D: North Ward flood infrastructure debate (legitimate debate + satire) ---
+    # --- Narrative D: Ciliwung flood budget debate (Kampung Melayu, legitimate + satire) ---
     (
-        "Genuinely torn on the new storm drain budget for North Ward - it's expensive, "
-        "but we've flooded three times in five years. What's the actual cost of doing "
-        "nothing?",
+        "Genuinely torn on the new Ciliwung normalization budget for Kampung Melayu - it's "
+        "expensive, but we've flooded three times in five years. What's the actual cost of "
+        "doing nothing?",
         ContentSource.FORUM,
         "user_grace_w",
-        "North Ward",
+        "Kampung Melayu",
         20.0,
     ),
     (
-        "BREAKING: City council to replace all storm drains with giant curly straws, "
-        "sources (my cat) confirm. /s obviously, but seriously when is North Ward "
-        "getting real flood relief?",
+        "BREAKING: City council to replace all Ciliwung floodgates with giant curly "
+        "straws, sources (my cat) confirm. /s obviously, but seriously when is Kampung "
+        "Melayu getting real flood relief?",
         ContentSource.SOCIAL,
         "user_felix_r",
-        "North Ward",
+        "Kampung Melayu",
         19.0,
     ),
 ]
