@@ -37,6 +37,7 @@ COPY --from=builder --chown=appuser:appuser /app /app
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
+    PYTHONUTF8=1 \
     PORT=8000
 
 USER appuser

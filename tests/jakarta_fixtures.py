@@ -1,5 +1,5 @@
 """Shared Jakarta-flavored sample post text for integration tests, mirroring
-scripts/seed_demo_data.py's narrative themes (ERP road pricing, MRT Fase 2 tree removal).
+scripts/seed_demo_data.py's claim themes (ERP road pricing, MRT Fase 2 tree removal).
 
 Kept in English on purpose - all-MiniLM-L6-v2 is English-only, and these constants exist to
 exercise clustering/CIB-detection logic reliably, not to demo Bahasa Indonesia content (that's

@@ -1,12 +1,12 @@
 import enum
 
 
-class ClassificationLabel(str, enum.Enum):
-    LEGITIMATE_DEBATE = "legitimate_debate"
-    MISINFORMATION = "misinformation"
-    DISINFORMATION = "disinformation"
-    SATIRE = "satire"
-    UNKNOWN = "unknown"
+class ContentSource(str, enum.Enum):
+    SOCIAL = "social"
+    RSS = "rss"
+    RADIO = "radio"
+    FORUM = "forum"
+    OTHER = "other"
 
 
 class MoralFoundation(str, enum.Enum):
@@ -19,34 +19,30 @@ class MoralFoundation(str, enum.Enum):
     NEUTRAL = "neutral"
 
 
-class ContentSource(str, enum.Enum):
-    SOCIAL = "social"
-    RSS = "rss"
-    RADIO = "radio"
-    FORUM = "forum"
-    OTHER = "other"
+class Stance(str, enum.Enum):
+    """A post's stance relative to the claim it has been clustered into.
+    Assessed only once a claim exists - never at ingestion time."""
+
+    SUPPORTING = "supporting"
+    OPPOSING = "opposing"
+    NEUTRAL = "neutral"
 
 
-class RiskLevel(str, enum.Enum):
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
+class ClaimType(str, enum.Enum):
+    """Fixed by pipeline of origin: EXISTING claims come from real ingested/clustered
+    content; NON_EXISTING claims come from the prediction flow and have no content."""
+
+    EXISTING = "existing"
+    NON_EXISTING = "non_existing"
 
 
-class NarrativeStatus(str, enum.Enum):
+class ClaimStatus(str, enum.Enum):
+    """Business rule (enforced in app.services.claim_service and via a DB CHECK
+    constraint on the claims table): EXISTING claims can never be PREBUNK;
+    NON_EXISTING claims can never be DEBUNK."""
+
+    UNREVIEWED = "unreviewed"
     ACTIVE = "active"
-    MONITORING = "monitoring"
-    RESOLVED = "resolved"
-    ARCHIVED = "archived"
-
-
-class ResponseType(str, enum.Enum):
-    PREBUNK = "PREBUNK"
-    TRUTH_SANDWICH = "TRUTH_SANDWICH"
-
-
-class ResponseStatus(str, enum.Enum):
-    DRAFT = "DRAFT"
-    APPROVED = "APPROVED"
-    EDITED = "EDITED"
-    REJECTED = "REJECTED"
+    INACTIVE = "inactive"
+    PREBUNK = "prebunk"
+    DEBUNK = "debunk"

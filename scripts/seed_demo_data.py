@@ -1,13 +1,17 @@
-"""Seed the CIS AI Service with realistic Jakarta demo data for the hackathon walkthrough.
+"""Seed the CIS AI Service with realistic Jakarta demo data for the hackathon walkthrough,
+aligned with PRD v1.1's Claim Repository Bank (F1) model.
 
 Populates:
-  - 4 community Fault Lines (real Jakarta historical grievances used for RAG grounding /
-    risk scoring)
-  - 13 realistic urban-climate-policy posts across 4 emerging narratives, grounded in
-    actual Jakarta policies and places (ERP road pricing, MRT Fase 2 tree removal, ITF
-    Sunter waste-to-energy plant, Ciliwung flood-control budget)
+  - 4 real Jakarta community Fault Lines (used for RAG grounding of Debunk/Prebunk Activity)
+  - 13 realistic urban-climate-policy posts across 4 emerging EXISTING claims, grounded in
+    actual Jakarta policies (ERP road pricing, MRT Fase 2 tree removal, ITF Sunter waste
+    plant, Ciliwung flood-control budget) - Topics form dynamically from these clusters,
+    not hardcoded
+  - 2 predicted NON_EXISTING claims (D2), exercising the prediction pipeline against
+    policies not yet circulating in public discourse
 Then runs the same pipeline production traffic would trigger: embed -> classify (OpenAI)
--> persist -> cluster into Narratives -> score risk.
+-> persist -> cluster into EXISTING claims -> score (R/V/F/H/EI/NPR) -> cache Debunk
+Activity, plus the separate NON_EXISTING prediction flow.
 
 Note: post text is kept in English on purpose even though this is Jakarta data - the
 embedding model (sentence-transformers/all-MiniLM-L6-v2) is English-only, so English text
@@ -29,12 +33,9 @@ from app.core.config import settings
 from app.core.database import AsyncSessionLocal, Base, engine
 from app.core.logging_config import configure_logging
 from app.models.content import ContentItem
-from app.models.enums import (
-    ClassificationLabel,
-    ContentSource,
-    MoralFoundation,
-)
+from app.models.enums import ContentSource, MoralFoundation
 from app.models.fault_line import FaultLine
+from app.services.claim_prediction_service import predict_non_existing_claim
 from app.services.clustering_service import cluster_unclustered_content
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.llm_client import LLMClient, get_llm_client
@@ -95,7 +96,7 @@ DEMO_FAULT_LINES = [
 
 # (text, source, author_id, location, hours_ago)
 DEMO_POSTS: list[tuple[str, ContentSource, str, str, float]] = [
-    # --- Narrative A: ERP (Electronic Road Pricing) backlash (Sudirman-Thamrin corridor) ---
+    # --- ERP (Electronic Road Pricing) backlash (Sudirman-Thamrin corridor) ---
     (
         "The new ERP gantries on Sudirman are just a backdoor way to bring in a full "
         "congestion charge next year, watch what happens to our commute costs.",
@@ -138,7 +139,7 @@ DEMO_POSTS: list[tuple[str, ContentSource, str, str, float]] = [
         "Thamrin",
         0.25,
     ),
-    # --- Narrative B: MRT Fase 2 tree removal backlash (Kota Tua / Monas corridor) ---
+    # --- MRT Fase 2 tree removal backlash (Kota Tua / Monas corridor) ---
     (
         "City quietly approved removing dozens of mature trees along the MRT Fase 2 route "
         "near Monas for construction staging. This is an environmental betrayal.",
@@ -164,7 +165,7 @@ DEMO_POSTS: list[tuple[str, ContentSource, str, str, float]] = [
         "Kota Tua",
         5.0,
     ),
-    # --- Narrative C: ITF Sunter waste plant fire claims (Sunter / Cakung) ---
+    # --- ITF Sunter waste plant fire claims (Sunter / Cakung) ---
     (
         "Sources say the ITF Sunter waste plant test-burn last week released toxic smoke "
         "and the city is covering it up to avoid a lawsuit. Check your air quality apps.",
@@ -190,7 +191,7 @@ DEMO_POSTS: list[tuple[str, ContentSource, str, str, float]] = [
         "Cakung",
         8.5,
     ),
-    # --- Narrative D: Ciliwung flood budget debate (Kampung Melayu, legitimate + satire) ---
+    # --- Ciliwung flood budget debate (Kampung Melayu, legitimate + satire) ---
     (
         "Genuinely torn on the new Ciliwung normalization budget for Kampung Melayu - it's "
         "expensive, but we've flooded three times in five years. What's the actual cost of "
@@ -211,6 +212,23 @@ DEMO_POSTS: list[tuple[str, ContentSource, str, str, float]] = [
     ),
 ]
 
+# (policy_title, policy_description) - predicted ahead of the policy being announced,
+# exercising the D2 (Non-Existing claim) prediction pipeline.
+DEMO_POLICY_PREDICTIONS: list[tuple[str, str]] = [
+    (
+        "MRT Fase 2 Bundaran HI-Kota Extension",
+        "The city will extend the MRT line from Bundaran HI to Kota, requiring temporary "
+        "road closures and utility relocation along the route, funded by the existing "
+        "transit infrastructure budget with no fare changes planned.",
+    ),
+    (
+        "Ciliwung River Normalization Program Phase 3",
+        "The city will continue riverbank normalization along the Ciliwung in flood-prone "
+        "wards, including a resettlement assistance program for any affected households, "
+        "funded by the municipal housing budget.",
+    ),
+]
+
 
 async def ensure_schema() -> None:
     async with engine.begin() as conn:
@@ -219,10 +237,16 @@ async def ensure_schema() -> None:
 
 
 async def clear_demo_data(session) -> None:
-    await session.execute(text("DELETE FROM intervention_responses"))
+    # content_items.claim_id is ON DELETE SET NULL, claim_policies is ON DELETE CASCADE
+    # from claims, and claims.topic_id is ON DELETE RESTRICT - so claims must be cleared
+    # before topics, and content_items before claims for a clean reset either way.
     await session.execute(text("DELETE FROM content_items"))
-    await session.execute(text("DELETE FROM narratives"))
+    await session.execute(text("DELETE FROM claims"))
+    await session.execute(text("DELETE FROM topic_volume_buckets"))
+    await session.execute(text("DELETE FROM topics"))
+    await session.execute(text("DELETE FROM policies"))
     await session.execute(text("DELETE FROM fault_lines"))
+    await session.execute(text("DELETE FROM official_sources"))
     await session.commit()
 
 
@@ -247,14 +271,12 @@ async def _analyze_with_fallback(llm: LLMClient, text_content: str):
         return await llm.analyze_content(text_content)
     except Exception:  # noqa: BLE001 - keep seeding usable without a live OpenAI key
         logger.warning(
-            "OpenAI analysis failed (missing/invalid OPENAI_API_KEY?) - using fallback "
-            "classification for: %.60s...",
+            "OpenAI analysis failed (missing/invalid OPENAI_API_KEY, or rate-limited?) - "
+            "using fallback classification for: %.60s...",
             text_content,
         )
 
         class _Fallback:
-            classification = ClassificationLabel.UNKNOWN
-            confidence = 0.0
             outrage_score = 0.5
             moral_foundation = MoralFoundation.NEUTRAL
             extracted_claim = text_content[:200]
@@ -273,8 +295,6 @@ async def seed_content_items(session, embedder: EmbeddingService, llm: LLMClient
             source=source,
             author_id=author_id,
             location=location,
-            classification=analysis.classification,
-            confidence=analysis.confidence,
             outrage_score=analysis.outrage_score,
             moral_foundation=analysis.moral_foundation,
             extracted_claim=analysis.extracted_claim,
@@ -288,6 +308,23 @@ async def seed_content_items(session, embedder: EmbeddingService, llm: LLMClient
 
     await session.commit()
     return created
+
+
+async def seed_non_existing_claim_predictions(session, embedder: EmbeddingService, llm: LLMClient) -> int:
+    predicted = 0
+    for policy_title, policy_description in DEMO_POLICY_PREDICTIONS:
+        try:
+            prediction = await predict_non_existing_claim(
+                session, policy_title, policy_description, llm, embedder
+            )
+        except Exception:
+            logger.exception("Failed to predict a non-existing claim for %r", policy_title)
+            continue
+        logger.info(
+            "Predicted claim for %r: %.80s...", policy_title, prediction.claim.claim_statement
+        )
+        predicted += 1
+    return predicted
 
 
 async def main() -> None:
@@ -309,16 +346,24 @@ async def main() -> None:
         content_items = await seed_content_items(session, embedder, llm)
         logger.info("Created %d content items", len(content_items))
 
-        logger.info("Triggering narrative clustering...")
-        result = await cluster_unclustered_content(session, llm=llm)
+        logger.info("Triggering claim clustering...")
+        result = await cluster_unclustered_content(session, llm=llm, embedder=embedder)
         logger.info(
-            "Clustering complete: %d narratives created, %d updated, %d items clustered",
-            result.narratives_created,
-            result.narratives_updated,
+            "Clustering complete: %d claims created, %d updated, %d items clustered",
+            result.claims_created,
+            result.claims_updated,
             result.content_items_clustered,
         )
 
-    logger.info("Seed complete. Try: GET /api/v1/narratives")
+        logger.info(
+            "Seeding %d NON_EXISTING claim predictions...", len(DEMO_POLICY_PREDICTIONS)
+        )
+        predicted_count = await seed_non_existing_claim_predictions(session, embedder, llm)
+        logger.info("Predicted %d non-existing claims", predicted_count)
+
+    logger.info(
+        "Seed complete. Try: GET /api/v1/claims/existing and GET /api/v1/claims/non-existing"
+    )
 
 
 if __name__ == "__main__":

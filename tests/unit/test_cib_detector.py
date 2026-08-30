@@ -5,7 +5,7 @@ which is the exact thing this detector needs to catch."""
 
 from datetime import UTC, datetime, timedelta
 
-from app.schemas.response import CIBCheckPost
+from app.schemas.coordination import CIBCheckPost
 from app.services.cib_detector import detect_coordinated_behavior
 
 

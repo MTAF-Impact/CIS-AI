@@ -3,43 +3,37 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from app.models.enums import ClassificationLabel, ContentSource, MoralFoundation
+from app.models.enums import ContentSource, MoralFoundation
 from app.schemas.analysis import ContentAnalysisSchema
 from app.schemas.content import ContentItemBatchCreate, ContentItemCreate
-from app.schemas.response import CIBCheckPost, CIBCheckRequest
+from app.schemas.coordination import CIBCheckPost, CIBCheckRequest
 
 
 class TestContentAnalysisSchema:
     def test_valid_payload(self):
         schema = ContentAnalysisSchema(
-            classification=ClassificationLabel.MISINFORMATION,
-            confidence=0.9,
             outrage_score=0.5,
             moral_foundation=MoralFoundation.FAIRNESS,
             extracted_claim="claim",
             underlying_grievance="grievance",
         )
-        assert schema.classification == ClassificationLabel.MISINFORMATION
+        assert schema.outrage_score == 0.5
 
     @pytest.mark.parametrize("outrage_score", [-0.1, 1.1])
     def test_outrage_score_out_of_bounds_rejected(self, outrage_score):
         with pytest.raises(ValidationError):
             ContentAnalysisSchema(
-                classification=ClassificationLabel.UNKNOWN,
-                confidence=0.5,
                 outrage_score=outrage_score,
                 moral_foundation=MoralFoundation.NEUTRAL,
                 extracted_claim="claim",
                 underlying_grievance="grievance",
             )
 
-    def test_unknown_classification_value_rejected(self):
+    def test_unknown_moral_foundation_value_rejected(self):
         with pytest.raises(ValidationError):
             ContentAnalysisSchema(
-                classification="not_a_real_classification",
-                confidence=0.5,
                 outrage_score=0.5,
-                moral_foundation=MoralFoundation.NEUTRAL,
+                moral_foundation="not_a_real_moral_foundation",
                 extracted_claim="claim",
                 underlying_grievance="grievance",
             )
@@ -53,6 +47,12 @@ class TestContentItemCreate:
     def test_source_defaults_to_other(self):
         item = ContentItemCreate(text="hello")
         assert item.source == ContentSource.OTHER
+
+    def test_optional_metrics_default_to_none(self):
+        item = ContentItemCreate(text="hello")
+        assert item.impressions is None
+        assert item.positive_reaction_count is None
+        assert item.negative_reaction_count is None
 
 
 class TestContentItemBatchCreate:

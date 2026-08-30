@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
-from app.schemas.response import CIBCheckPost, CIBCheckResponse, CIBCluster
+from app.schemas.coordination import CIBCheckPost, CIBCheckResponse, CIBCluster
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 
 # Deterministic heuristic weights - each in [0, 1], summing to 1.0 when all three trigger.
