@@ -14,10 +14,10 @@ from app.schemas.content import (
     ContentItemRead,
 )
 from app.services.embedding_service import EmbeddingService, get_embedding_service
-from app.services.gemini_client import (
-    GeminiClient,
-    GeminiNotConfiguredError,
-    get_gemini_client,
+from app.services.llm_client import (
+    LLMClient,
+    LLMNotConfiguredError,
+    get_llm_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,10 +27,10 @@ router = APIRouter(prefix="/ingest", tags=["ingestion"])
 
 async def _analyze_and_build_item(
     payload: ContentItemCreate,
-    gemini: GeminiClient,
+    llm: LLMClient,
     embedding: list[float],
 ) -> ContentItem:
-    analysis = await gemini.analyze_content(payload.text)
+    analysis = await llm.analyze_content(payload.text)
     return ContentItem(
         text=payload.text,
         source=payload.source,
@@ -50,14 +50,14 @@ async def _analyze_and_build_item(
 async def ingest_content(
     payload: ContentItemCreate,
     db: AsyncSession = Depends(get_db),
-    gemini: GeminiClient = Depends(get_gemini_client),
+    llm: LLMClient = Depends(get_llm_client),
     embedder: EmbeddingService = Depends(get_embedding_service),
 ) -> ContentItem:
-    """Ingest a single piece of content: embed it, classify it via Gemini, persist it."""
+    """Ingest a single piece of content: embed it, classify it via OpenAI, persist it."""
     embedding = await run_in_threadpool(embedder.embed, payload.text)
     try:
-        item = await _analyze_and_build_item(payload, gemini, embedding)
-    except GeminiNotConfiguredError as exc:
+        item = await _analyze_and_build_item(payload, llm, embedding)
+    except LLMNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     db.add(item)
@@ -70,7 +70,7 @@ async def ingest_content(
 async def ingest_content_batch(
     payload: ContentItemBatchCreate,
     db: AsyncSession = Depends(get_db),
-    gemini: GeminiClient = Depends(get_gemini_client),
+    llm: LLMClient = Depends(get_llm_client),
     embedder: EmbeddingService = Depends(get_embedding_service),
 ) -> ContentItemBatchResult:
     """Ingest multiple content items in one call: batch-embed, then classify concurrently."""
@@ -79,7 +79,7 @@ async def ingest_content_batch(
 
     async def _build(entry: ContentItemCreate, vec: list[float]) -> ContentItem | dict:
         try:
-            return await _analyze_and_build_item(entry, gemini, vec)
+            return await _analyze_and_build_item(entry, llm, vec)
         except Exception as exc:
             logger.exception("Failed to analyze content item during batch ingest")
             return {"text": entry.text, "error": str(exc)}

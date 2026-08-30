@@ -10,10 +10,12 @@ class Base(DeclarativeBase):
     """Shared declarative base for all ORM models."""
 
 
-
+# SQL echo is opt-in via LOG_LEVEL=DEBUG (not tied to is_production) - SQLAlchemy sets its
+# own logger level/handler when echo=True, independent of app.core.logging_config, so this
+# is the only reliable way to control it without duplicate/uncontrolled log lines.
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=not settings.is_production,
+    echo=settings.LOG_LEVEL.upper() == "DEBUG",
     pool_pre_ping=True,
 )
 

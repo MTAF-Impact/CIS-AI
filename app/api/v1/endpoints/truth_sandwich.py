@@ -12,10 +12,10 @@ from app.schemas.response import (
     TruthSandwichGenerateRequest,
 )
 from app.services.embedding_service import EmbeddingService, get_embedding_service
-from app.services.gemini_client import (
-    GeminiClient,
-    GeminiNotConfiguredError,
-    get_gemini_client,
+from app.services.llm_client import (
+    LLMClient,
+    LLMNotConfiguredError,
+    get_llm_client,
 )
 from app.services.truth_sandwich_service import (
     NarrativeNotFoundError,
@@ -29,7 +29,7 @@ router = APIRouter(prefix="/response", tags=["truth-sandwich"])
 async def generate_response(
     payload: TruthSandwichGenerateRequest,
     db: AsyncSession = Depends(get_db),
-    gemini: GeminiClient = Depends(get_gemini_client),
+    llm: LLMClient = Depends(get_llm_client),
     embedder: EmbeddingService = Depends(get_embedding_service),
 ) -> InterventionResponse:
     """Draft a structured Truth Sandwich (Core Fact -> Neutral Flag -> Re-stated Fact)
@@ -37,11 +37,11 @@ async def generate_response(
     human-in-the-loop review."""
     try:
         return await generate_truth_sandwich_for_narrative(
-            db, payload.narrative_id, gemini=gemini, embedder=embedder
+            db, payload.narrative_id, llm=llm, embedder=embedder
         )
     except NarrativeNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except GeminiNotConfiguredError as exc:
+    except LLMNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 

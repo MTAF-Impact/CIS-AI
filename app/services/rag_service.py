@@ -30,7 +30,7 @@ async def retrieve_relevant_fault_lines(
 
 def build_grounding_context(fault_lines: list[FaultLine], extra_notes: str | None = None) -> str:
     """Render retrieved fault lines (and any extra grounding text) into a plain-text
-    context block suitable for a Gemini prompt."""
+    context block suitable for a OpenAI prompt."""
     lines: list[str] = []
     for fl in fault_lines:
         entry = f"- [{fl.community_name}] {fl.grievance_theme}"

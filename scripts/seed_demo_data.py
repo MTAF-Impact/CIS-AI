@@ -3,7 +3,7 @@
 Populates:
   - 4 community Fault Lines (historical grievances used for RAG grounding / risk scoring)
   - 13 realistic urban-climate-policy posts across 4 emerging narratives
-Then runs the same pipeline production traffic would trigger: embed -> classify (Gemini)
+Then runs the same pipeline production traffic would trigger: embed -> classify (OpenAI)
 -> persist -> cluster into Narratives -> score risk.
 
 Usage:
@@ -16,7 +16,9 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 
+from app.core.config import settings
 from app.core.database import AsyncSessionLocal, Base, engine
+from app.core.logging_config import configure_logging
 from app.models.content import ContentItem
 from app.models.enums import (
     ClassificationLabel,
@@ -26,9 +28,9 @@ from app.models.enums import (
 from app.models.fault_line import FaultLine
 from app.services.clustering_service import cluster_unclustered_content
 from app.services.embedding_service import EmbeddingService, get_embedding_service
-from app.services.gemini_client import GeminiClient, get_gemini_client
+from app.services.llm_client import LLMClient, get_llm_client
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
+configure_logging(level=settings.LOG_LEVEL, json_format=False)
 logger = logging.getLogger("seed_demo_data")
 
 NOW = datetime.now(UTC)
@@ -225,12 +227,12 @@ async def seed_fault_lines(session, embedder: EmbeddingService) -> list[FaultLin
     return created
 
 
-async def _analyze_with_fallback(gemini: GeminiClient, text_content: str):
+async def _analyze_with_fallback(llm: LLMClient, text_content: str):
     try:
-        return await gemini.analyze_content(text_content)
-    except Exception:  # noqa: BLE001 - keep seeding usable without a live Gemini key
+        return await llm.analyze_content(text_content)
+    except Exception:  # noqa: BLE001 - keep seeding usable without a live OpenAI key
         logger.warning(
-            "Gemini analysis failed (missing/invalid GEMINI_API_KEY?) - using fallback "
+            "OpenAI analysis failed (missing/invalid OPENAI_API_KEY?) - using fallback "
             "classification for: %.60s...",
             text_content,
         )
@@ -246,11 +248,11 @@ async def _analyze_with_fallback(gemini: GeminiClient, text_content: str):
         return _Fallback()
 
 
-async def seed_content_items(session, embedder: EmbeddingService, gemini: GeminiClient):
+async def seed_content_items(session, embedder: EmbeddingService, llm: LLMClient):
     created = []
     for post_text, source, author_id, location, hours_ago in DEMO_POSTS:
         embedding = embedder.embed(post_text)
-        analysis = await _analyze_with_fallback(gemini, post_text)
+        analysis = await _analyze_with_fallback(llm, post_text)
         item = ContentItem(
             text=post_text,
             source=source,
@@ -278,7 +280,7 @@ async def main() -> None:
     await ensure_schema()
 
     embedder = get_embedding_service()
-    gemini = get_gemini_client()
+    llm = get_llm_client()
 
     async with AsyncSessionLocal() as session:
         logger.info("Clearing previous demo data...")
@@ -288,12 +290,12 @@ async def main() -> None:
         fault_lines = await seed_fault_lines(session, embedder)
         logger.info("Created fault lines: %s", [fl.community_name for fl in fault_lines])
 
-        logger.info("Seeding %d content items (embedding + Gemini analysis)...", len(DEMO_POSTS))
-        content_items = await seed_content_items(session, embedder, gemini)
+        logger.info("Seeding %d content items (embedding + OpenAI analysis)...", len(DEMO_POSTS))
+        content_items = await seed_content_items(session, embedder, llm)
         logger.info("Created %d content items", len(content_items))
 
         logger.info("Triggering narrative clustering...")
-        result = await cluster_unclustered_content(session, gemini=gemini)
+        result = await cluster_unclustered_content(session, llm=llm)
         logger.info(
             "Clustering complete: %d narratives created, %d updated, %d items clustered",
             result.narratives_created,

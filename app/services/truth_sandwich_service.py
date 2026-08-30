@@ -9,7 +9,7 @@ from app.models.narrative import Narrative
 from app.models.response import InterventionResponse
 from app.services import rag_service
 from app.services.embedding_service import EmbeddingService, get_embedding_service
-from app.services.gemini_client import GeminiClient, get_gemini_client
+from app.services.llm_client import LLMClient, get_llm_client
 
 
 class NarrativeNotFoundError(Exception):
@@ -18,7 +18,7 @@ class NarrativeNotFoundError(Exception):
 
 def _summarize_viral_claim(narrative: Narrative) -> str:
     """Build a neutral description of what's circulating, from the narrative and its
-    flagged content items, WITHOUT quoting the false claims verbatim (Gemini is
+    flagged content items, WITHOUT quoting the false claims verbatim (OpenAI is
     separately instructed not to repeat/amplify them either - this is defense in depth)."""
     flagged_claims = [
         item.extracted_claim
@@ -38,10 +38,10 @@ def _summarize_viral_claim(narrative: Narrative) -> str:
 async def generate_truth_sandwich_for_narrative(
     db: AsyncSession,
     narrative_id: uuid.UUID,
-    gemini: GeminiClient | None = None,
+    llm: LLMClient | None = None,
     embedder: EmbeddingService | None = None,
 ) -> InterventionResponse:
-    gemini = gemini or get_gemini_client()
+    llm = llm or get_llm_client()
     embedder = embedder or get_embedding_service()
 
     stmt = (
@@ -59,7 +59,7 @@ async def generate_truth_sandwich_for_narrative(
     fault_lines = await rag_service.retrieve_relevant_fault_lines(db, query_text, embedder)
     grounding_context = rag_service.build_grounding_context(fault_lines)
 
-    sandwich = await gemini.generate_truth_sandwich(viral_claim_summary, grounding_context)
+    sandwich = await llm.generate_truth_sandwich(viral_claim_summary, grounding_context)
 
     response = InterventionResponse(
         narrative_id=narrative.id,
