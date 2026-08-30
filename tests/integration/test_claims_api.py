@@ -1,8 +1,10 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.models.enums import ContentSource
+from app.models.policy import Policy
 from tests.jakarta_fixtures import ERP_POSTS, TREE_REMOVAL_POSTS
 
 pytestmark = pytest.mark.integration
@@ -23,6 +25,21 @@ async def _seed_two_claims(client):
     cluster_response = await client.post("/api/v1/claims/cluster-now")
     assert cluster_response.status_code == 200
     assert cluster_response.json()["claims_created"] == 2
+
+
+async def _seed_policy(db_session, **overrides) -> Policy:
+    defaults = {
+        "title": "Kampung Pulo Housing Redevelopment",
+        "description": "Renovates public housing with no planned displacement.",
+        "rolled_out_date": datetime.now(UTC).date() + timedelta(days=90),
+        "processing": False,
+    }
+    defaults.update(overrides)
+    policy = Policy(**defaults)
+    db_session.add(policy)
+    await db_session.commit()
+    await db_session.refresh(policy)
+    return policy
 
 
 class TestIngestion:
@@ -146,29 +163,27 @@ class TestStatusUpdate:
         assert response.status_code == 200
         assert response.json()["status"] == "active"
 
-    async def test_existing_claim_cannot_become_prebunk(self, client):
+    async def test_action_taken_is_a_shared_status_for_both_claim_types(self, client, db_session):
+        # PRD v1.3: Prebunk/Debunk merged into one shared Action Taken status, usable
+        # by both Existing and Non-Existing claims - no more type-specific rejection.
         await _seed_two_claims(client)
-        claim_id = (await client.get("/api/v1/claims/existing")).json()["items"][0]["id"]
-
-        response = await client.patch(
-            f"/api/v1/claims/{claim_id}/status", json={"status": "prebunk"}
+        existing_claim_id = (await client.get("/api/v1/claims/existing")).json()["items"][0]["id"]
+        existing_response = await client.patch(
+            f"/api/v1/claims/{existing_claim_id}/status", json={"status": "action_taken"}
         )
-        assert response.status_code == 422
+        assert existing_response.status_code == 200
+        assert existing_response.json()["status"] == "action_taken"
 
-    async def test_non_existing_claim_cannot_become_debunk(self, client):
+        policy = await _seed_policy(db_session)
         predict_response = await client.post(
-            "/api/v1/claims/non-existing/predict",
-            json={
-                "policy_title": "Kampung Pulo Housing Redevelopment",
-                "policy_description": "Renovates public housing with no planned displacement.",
-            },
+            "/api/v1/claims/non-existing/predict", json={"policy_id": str(policy.id)}
         )
-        claim_id = predict_response.json()["claim"]["id"]
-
-        response = await client.patch(
-            f"/api/v1/claims/{claim_id}/status", json={"status": "debunk"}
+        non_existing_claim_id = predict_response.json()["claim"]["id"]
+        non_existing_response = await client.patch(
+            f"/api/v1/claims/{non_existing_claim_id}/status", json={"status": "action_taken"}
         )
-        assert response.status_code == 422
+        assert non_existing_response.status_code == 200
+        assert non_existing_response.json()["status"] == "action_taken"
 
     async def test_returns_404_for_unknown_claim(self, client):
         response = await client.patch(
@@ -178,13 +193,14 @@ class TestStatusUpdate:
 
 
 class TestNonExistingClaimPrediction:
-    async def test_predicts_an_unscored_claim(self, client):
+    async def test_predicts_an_unscored_claim(self, client, db_session):
+        policy = await _seed_policy(
+            db_session,
+            title="ITF Sunter Expansion",
+            description="Expands the ITF Sunter waste-to-energy plant capacity.",
+        )
         response = await client.post(
-            "/api/v1/claims/non-existing/predict",
-            json={
-                "policy_title": "ITF Sunter Expansion",
-                "policy_description": "Expands the ITF Sunter waste-to-energy plant capacity.",
-            },
+            "/api/v1/claims/non-existing/predict", json={"policy_id": str(policy.id)}
         )
         assert response.status_code == 201
         body = response.json()
@@ -255,7 +271,7 @@ class TestCoordinationCheck:
         assert response.json()["is_likely_coordinated"] is True
 
 
-class TestTopicsAndPolicies:
+class TestTopics:
     async def test_create_and_list_topic(self, client):
         create = await client.post("/api/v1/topics", json={"name": "Test Topic"})
         assert create.status_code == 201
@@ -263,11 +279,50 @@ class TestTopicsAndPolicies:
         listing = await client.get("/api/v1/topics")
         assert any(t["name"] == "Test Topic" for t in listing.json())
 
-    async def test_create_and_list_policy(self, client):
-        create = await client.post(
-            "/api/v1/policies", json={"title": "Test Policy", "description": "A test policy."}
-        )
-        assert create.status_code == 201
 
-        listing = await client.get("/api/v1/policies")
-        assert any(p["title"] == "Test Policy" for p in listing.json())
+class TestAlertBell:
+    async def test_add_and_remove_alert(self, client):
+        await _seed_two_claims(client)
+        claim_id = (await client.get("/api/v1/claims/existing")).json()["items"][0]["id"]
+
+        add_response = await client.post(f"/api/v1/claims/{claim_id}/alert")
+        assert add_response.status_code == 201
+        assert add_response.json()["is_alerted"] is True
+
+        watchlist = (await client.get("/api/v1/alerts")).json()
+        assert watchlist["total"] == 1
+        assert watchlist["items"][0]["claim_id"] == claim_id
+
+        remove_response = await client.delete(f"/api/v1/claims/{claim_id}/alert")
+        assert remove_response.status_code == 200
+        assert remove_response.json()["is_alerted"] is False
+
+        watchlist_after = (await client.get("/api/v1/alerts")).json()
+        assert watchlist_after["total"] == 0
+
+    async def test_non_existing_claim_cannot_be_alerted(self, client, db_session):
+        policy = await _seed_policy(db_session)
+        predict_response = await client.post(
+            "/api/v1/claims/non-existing/predict", json={"policy_id": str(policy.id)}
+        )
+        claim_id = predict_response.json()["claim"]["id"]
+
+        response = await client.post(f"/api/v1/claims/{claim_id}/alert")
+        assert response.status_code == 422
+
+
+class TestAdminSettings:
+    async def test_get_and_update_threshold(self, client):
+        response = await client.put("/api/v1/admin/settings", json={"over_threshold": 55.0})
+        assert response.status_code == 200
+        assert response.json()["over_threshold"] == 55.0
+
+        response = await client.get("/api/v1/admin/settings")
+        assert response.json()["over_threshold"] == 55.0
+
+    async def test_generate_generic_claim_is_fully_scored(self, client):
+        response = await client.post("/api/v1/admin/generate-generic-claim")
+        assert response.status_code == 201
+        claim = response.json()["claim"]
+        assert claim["final_claim_score"] is not None
+        assert claim["activity_content"]

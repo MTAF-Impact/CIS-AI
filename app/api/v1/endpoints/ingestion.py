@@ -12,6 +12,13 @@ from app.schemas.content import (
     ContentItemBatchResult,
     ContentItemCreate,
     ContentItemRead,
+    SyntheticIngestRequest,
+    SyntheticIngestResult,
+)
+from app.services.clustering_service import cluster_unclustered_content
+from app.services.content_ingestion_service import (
+    analyze_and_build_item,
+    build_grounding_context,
 )
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.llm_client import (
@@ -25,28 +32,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
 
 
-async def _analyze_and_build_item(
-    payload: ContentItemCreate,
-    llm: LLMClient,
-    embedding: list[float],
-) -> ContentItem:
-    analysis = await llm.analyze_content(payload.text)
-    return ContentItem(
-        text=payload.text,
-        source=payload.source,
-        author_id=payload.author_id,
-        location=payload.location,
-        outrage_score=analysis.outrage_score,
-        moral_foundation=analysis.moral_foundation,
-        extracted_claim=analysis.extracted_claim,
-        underlying_grievance=analysis.underlying_grievance,
-        impressions=payload.impressions,
-        positive_reaction_count=payload.positive_reaction_count,
-        negative_reaction_count=payload.negative_reaction_count,
-        embedding=embedding,
-    )
-
-
 @router.post("", response_model=ContentItemRead, status_code=201)
 async def ingest_content(
     payload: ContentItemCreate,
@@ -57,7 +42,7 @@ async def ingest_content(
     """Ingest a single piece of content: embed it, classify it via OpenAI, persist it."""
     embedding = await run_in_threadpool(embedder.embed, payload.text)
     try:
-        item = await _analyze_and_build_item(payload, llm, embedding)
+        item = await analyze_and_build_item(payload, llm, embedding)
     except LLMNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -80,7 +65,7 @@ async def ingest_content_batch(
 
     async def _build(entry: ContentItemCreate, vec: list[float]) -> ContentItem | dict:
         try:
-            return await _analyze_and_build_item(entry, llm, vec)
+            return await analyze_and_build_item(entry, llm, vec)
         except Exception as exc:
             logger.exception("Failed to analyze content item during batch ingest")
             return {"text": entry.text, "error": str(exc)}
@@ -104,3 +89,71 @@ async def ingest_content_batch(
             await db.refresh(item)
 
     return ContentItemBatchResult(created=created, failed=failed)
+
+
+@router.post("/generate-synthetic", response_model=SyntheticIngestResult, status_code=201)
+async def generate_synthetic_ingest(
+    payload: SyntheticIngestRequest,
+    db: AsyncSession = Depends(get_db),
+    llm: LLMClient = Depends(get_llm_client),
+    embedder: EmbeddingService = Depends(get_embedding_service),
+) -> SyntheticIngestResult:
+    """Prototype stand-in for the live crawler: since a scheduler-driven crawl isn't
+    wired up yet, this fabricates realistic Jakarta posts via the LLM and runs them
+    through the exact same embed + analyze + persist pipeline real ingested content
+    would go through. Meant to be triggered on demand (e.g. a "Generate sample data"
+    button in the FE), not a replacement for real ingestion once crawling exists."""
+    grounding_context = await build_grounding_context(db)
+    try:
+        synthetic_posts = await llm.generate_synthetic_posts(
+            payload.count, payload.topic_hint, grounding_context
+        )
+    except LLMNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if not synthetic_posts:
+        raise HTTPException(status_code=502, detail="LLM returned no synthetic posts")
+
+    embeddings = await run_in_threadpool(
+        embedder.embed_batch, [post.text for post in synthetic_posts]
+    )
+
+    async def _build(post, vec: list[float]) -> ContentItem | dict:
+        entry = ContentItemCreate(
+            text=post.text, source=post.source, author_id=post.author_id, location=post.location
+        )
+        try:
+            return await analyze_and_build_item(entry, llm, vec)
+        except Exception as exc:
+            logger.exception("Failed to analyze synthetic content item")
+            return {"text": post.text, "error": str(exc)}
+
+    results = await asyncio.gather(
+        *(_build(post, vec) for post, vec in zip(synthetic_posts, embeddings, strict=True))
+    )
+
+    created: list[ContentItem] = []
+    failed: list[dict] = []
+    for result in results:
+        if isinstance(result, ContentItem):
+            db.add(result)
+            created.append(result)
+        else:
+            failed.append(result)
+
+    if created:
+        await db.commit()
+        for item in created:
+            await db.refresh(item)
+
+    cluster_result = None
+    if payload.auto_cluster and created:
+        cluster_result = await cluster_unclustered_content(db, llm=llm, embedder=embedder)
+
+    return SyntheticIngestResult(
+        generated=created,
+        failed=failed,
+        claims_created=cluster_result.claims_created if cluster_result else None,
+        claims_updated=cluster_result.claims_updated if cluster_result else None,
+        content_items_clustered=cluster_result.content_items_clustered if cluster_result else None,
+    )

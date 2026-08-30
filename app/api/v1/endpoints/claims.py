@@ -7,10 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
+from app.models.alert import ClaimAlert
 from app.models.claim import Claim
 from app.models.content import ContentItem
 from app.models.enums import ClaimStatus, ClaimType, Stance
-from app.models.policy import ClaimPolicy
+from app.models.policy import ClaimPolicy, Policy
 from app.schemas.claim import (
     ClaimListEnvelope,
     ClaimListItemRead,
@@ -23,15 +24,12 @@ from app.schemas.claim import (
     NonExistingClaimPredictResponse,
     PolicyBrief,
     RescoreResponse,
+    TopAccountEntry,
     TopicBrief,
 )
 from app.schemas.content import ContentItemRead
 from app.services import scoring_engine
 from app.services.claim_prediction_service import predict_non_existing_claim
-from app.services.claim_service import (
-    InvalidClaimStatusError,
-    validate_status_transition,
-)
 from app.services.clustering_service import (
     cluster_unclustered_content,
     rescore_all_existing_claims,
@@ -41,6 +39,8 @@ from app.services.embedding_service import EmbeddingService, get_embedding_servi
 from app.services.llm_client import LLMClient, LLMNotConfiguredError, get_llm_client
 
 router = APIRouter(prefix="/claims", tags=["claims"])
+
+TOP_ACCOUNTS_LIMIT = 5
 
 
 async def _statement_counts(db: AsyncSession, claim_id: uuid.UUID) -> tuple[int, int]:
@@ -55,7 +55,39 @@ async def _statement_counts(db: AsyncSession, claim_id: uuid.UUID) -> tuple[int,
     return counts.get(Stance.SUPPORTING, 0), counts.get(Stance.OPPOSING, 0)
 
 
-async def _to_list_item(db: AsyncSession, claim: Claim) -> ClaimListItemRead:
+async def _alerted_claim_ids(db: AsyncSession, claim_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+    if not claim_ids:
+        return set()
+    rows = (
+        await db.execute(select(ClaimAlert.claim_id).where(ClaimAlert.claim_id.in_(claim_ids)))
+    ).scalars().all()
+    return set(rows)
+
+
+async def _is_alerted(db: AsyncSession, claim_id: uuid.UUID) -> bool:
+    return (await db.get(ClaimAlert, claim_id)) is not None
+
+
+async def _top_accounts(db: AsyncSession, claim_id: uuid.UUID) -> list[TopAccountEntry]:
+    """Top 5 accounts by post-volume contribution to this claim's Supporting side - see
+    TopAccountEntry's docstring for the interpretation-ambiguity note."""
+    rows = (
+        await db.execute(
+            select(ContentItem.author_id, func.count())
+            .where(
+                ContentItem.claim_id == claim_id,
+                ContentItem.stance == Stance.SUPPORTING,
+                ContentItem.author_id.is_not(None),
+            )
+            .group_by(ContentItem.author_id)
+            .order_by(func.count().desc())
+            .limit(TOP_ACCOUNTS_LIMIT)
+        )
+    ).all()
+    return [TopAccountEntry(account_handle=handle, contribution_count=count) for handle, count in rows]
+
+
+async def _to_list_item(db: AsyncSession, claim: Claim, is_alerted: bool) -> ClaimListItemRead:
     positive, negative = await _statement_counts(db, claim.id)
     return ClaimListItemRead(
         id=claim.id,
@@ -67,6 +99,7 @@ async def _to_list_item(db: AsyncSession, claim: Claim) -> ClaimListItemRead:
         positive_statement_count=positive,
         negative_statement_count=negative,
         final_claim_score=claim.final_claim_score,
+        is_alerted=is_alerted,
     )
 
 
@@ -100,7 +133,7 @@ def _to_non_existing_detail(claim: Claim) -> NonExistingClaimDetailRead:
     )
 
 
-def _to_existing_detail(claim: Claim) -> ExistingClaimDetailRead:
+async def _to_existing_detail(db: AsyncSession, claim: Claim) -> ExistingClaimDetailRead:
     by_stance: dict[Stance, list[ContentItemRead]] = {
         Stance.SUPPORTING: [],
         Stance.OPPOSING: [],
@@ -137,13 +170,21 @@ def _to_existing_detail(claim: Claim) -> ExistingClaimDetailRead:
         discount_factor=claim.discount_factor,
         final_claim_score=claim.final_claim_score,
         is_dormant=claim.is_dormant,
+        is_alerted=await _is_alerted(db, claim.id),
         activity_content=claim.activity_content,
         activity_generated_at=claim.activity_generated_at,
+        top_accounts=await _top_accounts(db, claim.id),
         supporting_statements=by_stance[Stance.SUPPORTING],
         opposing_statements=by_stance[Stance.OPPOSING],
         neutral_statements=by_stance[Stance.NEUTRAL],
         policies=policies,
     )
+
+
+async def _to_detail(db: AsyncSession, claim: Claim):
+    if claim.claim_type == ClaimType.NON_EXISTING:
+        return _to_non_existing_detail(claim)
+    return await _to_existing_detail(db, claim)
 
 
 async def _list_claims(
@@ -174,7 +215,8 @@ async def _list_claims(
     stmt = stmt.order_by(sort_key).limit(limit).offset(offset)
     claims = list((await db.execute(stmt)).scalars().all())
 
-    items = [await _to_list_item(db, claim) for claim in claims]
+    alerted_ids = await _alerted_claim_ids(db, [claim.id for claim in claims])
+    items = [await _to_list_item(db, claim, claim.id in alerted_ids) for claim in claims]
     return ClaimListEnvelope(fetched_at=datetime.now(UTC), total=total, items=items)
 
 
@@ -235,12 +277,18 @@ async def predict(
     llm: LLMClient = Depends(get_llm_client),
     embedder: EmbeddingService = Depends(get_embedding_service),
 ) -> NonExistingClaimPredictResponse:
+    """Manual/ad-hoc prediction trigger for an already-registered F2 policy. The
+    automatic path is the AI matchmaking pipeline (US42), which runs this same
+    underlying logic on policy creation without needing this endpoint."""
+    policy = await db.get(Policy, payload.policy_id)
+    if policy is None:
+        raise HTTPException(status_code=404, detail="Policy not found")
+
     try:
-        prediction = await predict_non_existing_claim(
-            db, payload.policy_title, payload.policy_description, llm, embedder
-        )
+        prediction = await predict_non_existing_claim(db, policy, llm, embedder)
     except LLMNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    await db.commit()
 
     claim = await _fetch_claim_with_relations(db, prediction.claim.id)
     return NonExistingClaimPredictResponse(
@@ -255,10 +303,7 @@ async def get_claim(claim_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     claim = await _fetch_claim_with_relations(db, claim_id)
     if claim is None:
         raise HTTPException(status_code=404, detail="Claim not found")
-
-    if claim.claim_type == ClaimType.NON_EXISTING:
-        return _to_non_existing_detail(claim)
-    return _to_existing_detail(claim)
+    return await _to_detail(db, claim)
 
 
 @router.patch("/{claim_id}/status", response_model=ExistingClaimDetailRead | NonExistingClaimDetailRead)
@@ -269,18 +314,11 @@ async def update_status(
     if claim is None:
         raise HTTPException(status_code=404, detail="Claim not found")
 
-    try:
-        validate_status_transition(claim.claim_type, payload.status)
-    except InvalidClaimStatusError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
     claim.status = payload.status
     await db.commit()
 
     claim = await _fetch_claim_with_relations(db, claim_id)
-    if claim.claim_type == ClaimType.NON_EXISTING:
-        return _to_non_existing_detail(claim)
-    return _to_existing_detail(claim)
+    return await _to_detail(db, claim)
 
 
 @router.patch("/{claim_id}/harm/confirm", response_model=ExistingClaimDetailRead)
@@ -313,4 +351,37 @@ async def confirm_harm(
     await db.commit()
 
     claim = await _fetch_claim_with_relations(db, claim_id)
-    return _to_existing_detail(claim)
+    return await _to_existing_detail(db, claim)
+
+
+@router.post("/{claim_id}/alert", response_model=ClaimListItemRead, status_code=201)
+async def add_alert(claim_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> ClaimListItemRead:
+    """Bell icon "Add" confirmation (US14) - F3 watchlist only ever accepts EXISTING
+    claims (US26)."""
+    claim = await db.get(Claim, claim_id)
+    if claim is None:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    if claim.claim_type != ClaimType.EXISTING:
+        raise HTTPException(status_code=422, detail="Only Existing claims can be alerted")
+
+    if await db.get(ClaimAlert, claim_id) is None:
+        db.add(ClaimAlert(claim_id=claim_id))
+        await db.commit()
+
+    claim = await _fetch_claim_with_relations(db, claim_id)
+    return await _to_list_item(db, claim, is_alerted=True)
+
+
+@router.delete("/{claim_id}/alert", response_model=ClaimListItemRead)
+async def remove_alert(claim_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> ClaimListItemRead:
+    """Bell icon "Remove" confirmation (US14)."""
+    claim = await _fetch_claim_with_relations(db, claim_id)
+    if claim is None:
+        raise HTTPException(status_code=404, detail="Claim not found")
+
+    alert = await db.get(ClaimAlert, claim_id)
+    if alert is not None:
+        await db.delete(alert)
+        await db.commit()
+
+    return await _to_list_item(db, claim, is_alerted=False)

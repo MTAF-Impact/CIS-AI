@@ -45,3 +45,21 @@ class ContentItemRead(BaseModel):
 class ContentItemBatchResult(BaseModel):
     created: list[ContentItemRead]
     failed: list[dict] = Field(default_factory=list)
+
+
+class SyntheticIngestRequest(BaseModel):
+    """Trigger the LLM to fabricate `count` posts and run them through the normal ingest
+    pipeline - a stand-in for the live crawler, which isn't wired up for this prototype.
+    Intended to be hit on demand, e.g. a "Generate sample data" button in the FE."""
+
+    count: int = Field(default=10, ge=1, le=50)
+    topic_hint: str | None = Field(default=None, max_length=255)
+    auto_cluster: bool = True
+
+
+class SyntheticIngestResult(BaseModel):
+    generated: list[ContentItemRead]
+    failed: list[dict] = Field(default_factory=list)
+    claims_created: int | None = None
+    claims_updated: int | None = None
+    content_items_clustered: int | None = None

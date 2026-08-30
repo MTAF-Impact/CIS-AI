@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from app.models.enums import MoralFoundation, Stance
+from app.models.enums import ContentSource, MoralFoundation, Stance
 
 
 class ContentAnalysisSchema(BaseModel):
@@ -72,3 +72,27 @@ class NonExistingClaimPredictionSchema(BaseModel):
     predicted_attack_angle: str
     likely_framing: str
     inoculation_explainer: str
+
+
+class SyntheticPostSchema(BaseModel):
+    """One LLM-fabricated post standing in for what a live crawler would have ingested
+    (see app.services.llm_client.LLMClient.generate_synthetic_posts). Only the raw post
+    itself is synthetic - it still flows through the normal analyze_content pipeline once
+    generated, exactly like a real ingested post."""
+
+    text: str = Field(min_length=1, max_length=2000)
+    source: ContentSource
+    author_id: str = Field(max_length=255)
+    location: str | None = Field(default=None, max_length=255)
+
+
+class SyntheticPostBatchSchema(BaseModel):
+    posts: list[SyntheticPostSchema]
+
+
+class PolicyClaimMatchBatchSchema(BaseModel):
+    """Structured output for the F2 AI matchmaking pipeline's existing-claim matching
+    step (US42a): one boolean per candidate claim, same order as given, true only if the
+    claim is genuinely about this specific policy (not just topically adjacent)."""
+
+    matches: list[bool]

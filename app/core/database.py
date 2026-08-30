@@ -31,3 +31,13 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency that yields a request-scoped async DB session."""
     async with AsyncSessionLocal() as session:
         yield session
+
+
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    """FastAPI-overridable indirection for code that can't use a request-scoped
+    Depends(get_db) - namely BackgroundTasks jobs (see
+    app.services.policy_matchmaking_service), which run detached from the request after
+    its own session has closed. Tests override this the same way they override get_db
+    (see tests/conftest.py's client fixture) so background jobs run against the test
+    database instead of silently falling back to the real DATABASE_URL engine."""
+    return AsyncSessionLocal

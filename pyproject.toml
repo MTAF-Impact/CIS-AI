@@ -21,6 +21,8 @@ dependencies = [
     "python-multipart>=0.0.9",
     "openai>=1.60.0",
     "torch>=2.0.0",
+    "pypdf>=6.16.2",
+    "python-docx>=1.2.0",
 ]
 
 [dependency-groups]

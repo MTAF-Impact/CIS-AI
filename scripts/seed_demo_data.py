@@ -25,7 +25,7 @@ Usage:
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import text
 
@@ -35,6 +35,7 @@ from app.core.logging_config import configure_logging
 from app.models.content import ContentItem
 from app.models.enums import ContentSource, MoralFoundation
 from app.models.fault_line import FaultLine
+from app.models.policy import Policy
 from app.services.claim_prediction_service import predict_non_existing_claim
 from app.services.clustering_service import cluster_unclustered_content
 from app.services.embedding_service import EmbeddingService, get_embedding_service
@@ -212,20 +213,23 @@ DEMO_POSTS: list[tuple[str, ContentSource, str, str, float]] = [
     ),
 ]
 
-# (policy_title, policy_description) - predicted ahead of the policy being announced,
-# exercising the D2 (Non-Existing claim) prediction pipeline.
-DEMO_POLICY_PREDICTIONS: list[tuple[str, str]] = [
+# (policy_title, policy_description, rolled_out_date) - registered as real F2 Policy
+# records ahead of their rollout (Not Rolled Out), exercising the D2 (Non-Existing
+# claim) prediction pipeline the same way F2's AI matchmaking (US42) would.
+DEMO_POLICY_PREDICTIONS: list[tuple[str, str, date]] = [
     (
         "MRT Fase 2 Bundaran HI-Kota Extension",
         "The city will extend the MRT line from Bundaran HI to Kota, requiring temporary "
         "road closures and utility relocation along the route, funded by the existing "
         "transit infrastructure budget with no fare changes planned.",
+        NOW.date() + timedelta(days=120),
     ),
     (
         "Ciliwung River Normalization Program Phase 3",
         "The city will continue riverbank normalization along the Ciliwung in flood-prone "
         "wards, including a resettlement assistance program for any affected households, "
         "funded by the municipal housing budget.",
+        NOW.date() + timedelta(days=180),
     ),
 ]
 
@@ -237,10 +241,14 @@ async def ensure_schema() -> None:
 
 
 async def clear_demo_data(session) -> None:
-    # content_items.claim_id is ON DELETE SET NULL, claim_policies is ON DELETE CASCADE
-    # from claims, and claims.topic_id is ON DELETE RESTRICT - so claims must be cleared
-    # before topics, and content_items before claims for a clean reset either way.
+    # content_items.claim_id is ON DELETE SET NULL, claim_policies/claim_alerts/
+    # claim_score_snapshots are ON DELETE CASCADE from claims, and claims.topic_id is ON
+    # DELETE RESTRICT - so claims must be cleared before topics, and content_items
+    # before claims for a clean reset either way. admin_settings is left untouched -
+    # it's a global config row, not demo content.
     await session.execute(text("DELETE FROM content_items"))
+    await session.execute(text("DELETE FROM claim_alerts"))
+    await session.execute(text("DELETE FROM claim_score_snapshots"))
     await session.execute(text("DELETE FROM claims"))
     await session.execute(text("DELETE FROM topic_volume_buckets"))
     await session.execute(text("DELETE FROM topics"))
@@ -312,14 +320,22 @@ async def seed_content_items(session, embedder: EmbeddingService, llm: LLMClient
 
 async def seed_non_existing_claim_predictions(session, embedder: EmbeddingService, llm: LLMClient) -> int:
     predicted = 0
-    for policy_title, policy_description in DEMO_POLICY_PREDICTIONS:
+    for policy_title, policy_description, rolled_out_date in DEMO_POLICY_PREDICTIONS:
+        policy = Policy(
+            title=policy_title,
+            description=policy_description,
+            rolled_out_date=rolled_out_date,
+            processing=False,
+        )
+        session.add(policy)
+        await session.flush()
+
         try:
-            prediction = await predict_non_existing_claim(
-                session, policy_title, policy_description, llm, embedder
-            )
+            prediction = await predict_non_existing_claim(session, policy, llm, embedder)
         except Exception:
             logger.exception("Failed to predict a non-existing claim for %r", policy_title)
             continue
+        await session.commit()
         logger.info(
             "Predicted claim for %r: %.80s...", policy_title, prediction.claim.claim_statement
         )

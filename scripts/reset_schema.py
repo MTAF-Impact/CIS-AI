@@ -1,8 +1,9 @@
 """Drop and recreate every table in the CIS AI Service schema.
 
-DESTRUCTIVE - drops every table Base.metadata knows about and recreates them empty.
-Intended for pre-launch/demo use against a disposable database (this project has no
-migrations tool; schema is Base.metadata.create_all-driven, same as
+DESTRUCTIVE - drops every table that physically exists in the `public` schema (not just
+ones the current SQLAlchemy models know about - see note below) and recreates the current
+set empty. Intended for pre-launch/demo use against a disposable database (this project has
+no migrations tool; schema is Base.metadata.create_all-driven, same as
 scripts/seed_demo_data.py's ensure_schema()). Run manually:
 
     uv run python scripts/reset_schema.py
@@ -25,9 +26,26 @@ logger = logging.getLogger("reset_schema")
 async def reset_schema() -> None:
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        logger.info("Dropping all known tables...")
-        await conn.run_sync(Base.metadata.drop_all)
-        logger.info("Creating all tables...")
+
+        # Drop every table that physically exists, not just ones Base.metadata currently
+        # has a model for. Base.metadata.drop_all() alone silently leaves orphaned tables
+        # behind whenever a model file is deleted (e.g. Narrative/InterventionResponse
+        # being superseded by Claim in the PRD v1.1 rearchitecture) - it has no way to
+        # know those tables ever existed, so this queries pg_tables directly instead.
+        existing_tables = [
+            row[0]
+            for row in (
+                await conn.execute(
+                    text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+                )
+            )
+        ]
+        if existing_tables:
+            logger.info("Dropping %d existing table(s): %s", len(existing_tables), existing_tables)
+            for table_name in existing_tables:
+                await conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))
+
+        logger.info("Creating current tables...")
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Schema reset complete.")
 

@@ -1,12 +1,11 @@
-"""Predicts NON_EXISTING claims ahead of a policy announcement (PRD Section 3.3 / D2).
-NON_EXISTING claims have no content by construction and are never scored - see
-app.models.claim.Claim's claim_type docstring for the fixed-by-pipeline-of-origin
-reasoning."""
+"""Predicts NON_EXISTING claims for a policy (PRD Section 3.3 / D2, and the F2 AI
+matchmaking pipeline's US42(b)). NON_EXISTING claims have no content by construction and
+are never scored - see app.models.claim.Claim's claim_type docstring for the
+fixed-by-pipeline-of-origin reasoning."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.claim import Claim
@@ -26,37 +25,30 @@ class NonExistingClaimPrediction:
     likely_framing: str
 
 
-async def _find_or_create_policy(db: AsyncSession, title: str, description: str) -> Policy:
-    """F2 (Public Policy Bank) is out of scope - this is the minimal bridge until it
-    exists: find an existing Policy by exact title, or create one inline."""
-    policy = (
-        await db.execute(select(Policy).where(Policy.title == title))
-    ).scalar_one_or_none()
-    if policy is not None:
-        return policy
-
-    policy = Policy(title=title, description=description)
-    db.add(policy)
-    await db.flush()
-    return policy
-
-
 async def predict_non_existing_claim(
     db: AsyncSession,
-    policy_title: str,
-    policy_description: str,
+    policy: Policy,
     llm: LLMClient,
     embedder: EmbeddingService,
+    already_covered_claim_statements: list[str] | None = None,
 ) -> NonExistingClaimPrediction:
-    policy = await _find_or_create_policy(db, policy_title, policy_description)
-
+    """Predicts one new NON_EXISTING claim for `policy`. If
+    `already_covered_claim_statements` is given (the Existing claims the matchmaking
+    pipeline already confirmed-matched to this policy), the LLM is asked to predict a
+    claim distinct from those, rather than duplicating an aspect already covered."""
     fault_lines = await rag_service.retrieve_relevant_fault_lines(
-        db, f"{policy_title} {policy_description}", embedder
+        db, f"{policy.title} {policy.description or ''}", embedder
     )
     grounding_context = rag_service.build_grounding_context(fault_lines)
+    if already_covered_claim_statements:
+        covered = "\n".join(f"- {s}" for s in already_covered_claim_statements)
+        grounding_context = (
+            f"{grounding_context}\n\nClaims already matched to this policy (predict "
+            f"something NOT already covered by these):\n{covered}"
+        )
 
     prediction = await llm.predict_non_existing_claim(
-        policy_title, policy_description, grounding_context
+        policy.title, policy.description or "", grounding_context
     )
 
     claim_embedding = embedder.embed(prediction.claim_statement)
@@ -75,8 +67,7 @@ async def predict_non_existing_claim(
         activity_generated_at=now,
     )
     db.add(claim)
-    await db.commit()
-    await db.refresh(claim)
+    await db.flush()
 
     return NonExistingClaimPrediction(
         claim=claim,
