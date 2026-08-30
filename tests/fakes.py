@@ -6,13 +6,14 @@ so it can be swapped in via FastAPI's dependency_overrides or passed directly to
 functions that accept an `llm` parameter.
 """
 
-from app.models.enums import MoralFoundation, Stance
+from app.models.enums import ContentSource, MoralFoundation, Stance
 from app.schemas.analysis import (
     ClaimSummarySchema,
     ContentAnalysisSchema,
     DebunkContentSchema,
     HarmClassificationSchema,
     NonExistingClaimPredictionSchema,
+    SyntheticPostSchema,
 )
 
 
@@ -110,6 +111,39 @@ class FakeLLMClient:
             inoculation_explainer="Fake inoculation explainer grounded in test context.",
         )
 
+    async def generate_synthetic_posts(
+        self, count: int, topic_hint: str | None, grounding_context: str
+    ) -> list[SyntheticPostSchema]:
+        self.calls.append(
+            ("generate_synthetic_posts", (count, topic_hint, grounding_context), {})
+        )
+        label = topic_hint or "General"
+        return [
+            SyntheticPostSchema(
+                text=f"Fake synthetic post #{i} about {label} for testing.",
+                source=ContentSource.SOCIAL,
+                author_id=f"fake_user_{i}",
+                location=None,
+            )
+            for i in range(count)
+        ]
+
+    async def confirm_policy_claim_matches(
+        self, policy_title: str, policy_description: str, candidate_claim_statements: list[str]
+    ) -> list[bool]:
+        self.calls.append(
+            (
+                "confirm_policy_claim_matches",
+                (policy_title, policy_description, candidate_claim_statements),
+                {},
+            )
+        )
+        lowered_title = policy_title.lower()
+        return [
+            any(word in statement.lower() for word in lowered_title.split() if len(word) > 3)
+            for statement in candidate_claim_statements
+        ]
+
 
 class AlwaysFailingLLMClient:
     """Simulates LLMNotConfiguredError, for testing the 503 error-translation path."""
@@ -141,6 +175,16 @@ class AlwaysFailingLLMClient:
     async def predict_non_existing_claim(
         self, policy_title: str, policy_description: str, grounding_context: str
     ) -> NonExistingClaimPredictionSchema:
+        raise self._error()
+
+    async def generate_synthetic_posts(
+        self, count: int, topic_hint: str | None, grounding_context: str
+    ) -> list[SyntheticPostSchema]:
+        raise self._error()
+
+    async def confirm_policy_claim_matches(
+        self, policy_title: str, policy_description: str, candidate_claim_statements: list[str]
+    ) -> list[bool]:
         raise self._error()
 
     @staticmethod

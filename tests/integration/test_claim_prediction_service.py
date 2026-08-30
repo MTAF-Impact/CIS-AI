@@ -1,5 +1,6 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
-from sqlalchemy import select
 
 from app.models.enums import ClaimStatus, ClaimType
 from app.models.policy import Policy
@@ -9,25 +10,37 @@ from tests.fakes import FakeLLMClient
 pytestmark = pytest.mark.integration
 
 
+def _policy(**overrides) -> Policy:
+    defaults = {
+        "title": "Kampung Pulo Housing Redevelopment",
+        "description": (
+            "The city will renovate public housing in Kampung Pulo along the "
+            "Ciliwung riverbank with no planned displacement."
+        ),
+        "rolled_out_date": datetime.now(UTC).date() + timedelta(days=90),
+        "processing": False,
+    }
+    defaults.update(overrides)
+    return Policy(**defaults)
+
+
 class TestPredictNonExistingClaim:
     async def test_creates_an_unscored_non_existing_claim(self, db_session, real_embedder):
+        policy = _policy()
+        db_session.add(policy)
+        await db_session.flush()
+
         prediction = await predict_non_existing_claim(
-            db_session,
-            policy_title="Kampung Pulo Housing Redevelopment",
-            policy_description=(
-                "The city will renovate public housing in Kampung Pulo along the "
-                "Ciliwung riverbank with no planned displacement."
-            ),
-            llm=FakeLLMClient(),
-            embedder=real_embedder,
+            db_session, policy, llm=FakeLLMClient(), embedder=real_embedder
         )
+        await db_session.commit()
 
         claim = prediction.claim
         assert claim.claim_type == ClaimType.NON_EXISTING
         assert claim.status == ClaimStatus.UNREVIEWED
         assert claim.claim_statement
         assert claim.topic_id is not None
-        assert claim.policy_id is not None
+        assert claim.policy_id == policy.id
         assert claim.activity_content
         assert claim.activity_generated_at is not None
 
@@ -44,27 +57,23 @@ class TestPredictNonExistingClaim:
         assert prediction.predicted_attack_angle
         assert prediction.likely_framing
 
-    async def test_reuses_an_existing_policy_with_the_same_title(self, db_session, real_embedder):
-        first = await predict_non_existing_claim(
-            db_session,
-            policy_title="ERP Road Pricing Expansion",
-            policy_description="Expands ERP gantries to more corridors.",
-            llm=FakeLLMClient(),
-            embedder=real_embedder,
-        )
-        second = await predict_non_existing_claim(
-            db_session,
-            policy_title="ERP Road Pricing Expansion",
-            policy_description="Expands ERP gantries to more corridors.",
-            llm=FakeLLMClient(),
-            embedder=real_embedder,
-        )
+    async def test_already_covered_statements_are_forwarded_to_the_llm(
+        self, db_session, real_embedder
+    ):
+        policy = _policy(title="ERP Road Pricing Expansion", description="Expands ERP gantries.")
+        db_session.add(policy)
+        await db_session.flush()
 
-        assert first.claim.policy_id == second.claim.policy_id
+        llm = FakeLLMClient()
+        await predict_non_existing_claim(
+            db_session,
+            policy,
+            llm=llm,
+            embedder=real_embedder,
+            already_covered_claim_statements=["ERP is secretly a hidden tax"],
+        )
+        await db_session.commit()
 
-        policies = (
-            await db_session.execute(
-                select(Policy).where(Policy.title == "ERP Road Pricing Expansion")
-            )
-        ).scalars().all()
-        assert len(policies) == 1
+        call = next(c for c in llm.calls if c[0] == "predict_non_existing_claim")
+        _, _, grounding_context = call[1]
+        assert "ERP is secretly a hidden tax" in grounding_context

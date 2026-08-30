@@ -37,12 +37,20 @@ class ClaimType(str, enum.Enum):
 
 
 class ClaimStatus(str, enum.Enum):
-    """Business rule (enforced in app.services.claim_service and via a DB CHECK
-    constraint on the claims table): EXISTING claims can never be PREBUNK;
-    NON_EXISTING claims can never be DEBUNK."""
+    """PRD v1.3: a single shared status set for both claim types - the old type-specific
+    PREBUNK/DEBUNK statuses (and the business rule barring EXISTING from PREBUNK /
+    NON_EXISTING from DEBUNK) have been merged into one shared ACTION_TAKEN status."""
 
     UNREVIEWED = "unreviewed"
     ACTIVE = "active"
     INACTIVE = "inactive"
-    PREBUNK = "prebunk"
-    DEBUNK = "debunk"
+    ACTION_TAKEN = "action_taken"
+
+
+class PolicyStatus(str, enum.Enum):
+    """Derived, never stored as a plain flag - see app.models.policy.Policy.status
+    (a computed property from rolled_out_date vs. wall-clock time), so it can never go
+    stale the way a written-once column would without a scheduled re-evaluation job."""
+
+    NOT_ROLLED_OUT = "not_rolled_out"
+    ROLLED_OUT = "rolled_out"

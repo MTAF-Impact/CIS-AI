@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
-    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -30,16 +29,13 @@ class Claim(Base):
     """Replaces Narrative. claim_type is fixed by pipeline of origin (EXISTING claims
     come from clustering real content; NON_EXISTING claims come from the prediction
     flow and are never scored) - see app.services.clustering_service and
-    app.services.claim_prediction_service."""
+    app.services.claim_prediction_service.
+
+    PRD v1.3 simplified the status model to one shared ClaimStatus set for both types
+    (no more type-specific PREBUNK/DEBUNK), so there is no longer a status/type CHECK
+    constraint here."""
 
     __tablename__ = "claims"
-    __table_args__ = (
-        CheckConstraint(
-            "NOT (claim_type = 'existing' AND status = 'prebunk') "
-            "AND NOT (claim_type = 'non_existing' AND status = 'debunk')",
-            name="ck_claim_status_matches_type",
-        ),
-    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4

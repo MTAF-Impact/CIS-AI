@@ -16,6 +16,7 @@ import numpy as np
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.alert import ClaimScoreSnapshot
 from app.models.claim import Claim
 from app.models.content import ContentItem
 from app.models.enums import ClaimStatus, ClaimType, Stance
@@ -112,7 +113,7 @@ async def _reach_inputs(db: AsyncSession, claim_id: uuid.UUID) -> tuple[int, int
     return impressions, unique_authors, content_count, distinct_platforms
 
 
-async def _renormalize_topic_reach(db: AsyncSession, topic_id: uuid.UUID) -> list[Claim]:
+async def renormalize_topic_reach(db: AsyncSession, topic_id: uuid.UUID) -> list[Claim]:
     """Min-max normalizes raw Reach across every EXISTING claim in a topic (scoped
     per-topic - see scoring_engine.normalize_minmax_per_topic). Returns the full claim
     list so the caller can also rescore them (a reach change makes their cached
@@ -246,7 +247,7 @@ async def _emotional_intensity_inputs(
 
 async def rescore_claim(db: AsyncSession, claim: Claim) -> None:
     """Recomputes everything EXCEPT Reach (handled separately per-topic by
-    _renormalize_topic_reach, which must run first) and Harm (classified once at claim
+    renormalize_topic_reach, which must run first) and Harm (classified once at claim
     creation - see the Pass 2 harm block below; it doesn't drift with new supporting
     volume the way Velocity/NPR do)."""
     supporting_vol, opposing_vol = await _npr_volumes(db, claim.id, scoring_engine.ROLLING_WINDOW_HOURS)
@@ -290,6 +291,10 @@ async def rescore_claim(db: AsyncSession, claim: Claim) -> None:
     claim.claim_score = score
     claim.final_claim_score = final
 
+    # Powers the F3 trend chart [C1] - Claim only ever holds the current score, so this
+    # is the only history of how FinalClaimScore moved over time.
+    db.add(ClaimScoreSnapshot(claim_id=claim.id, final_claim_score=final))
+
 
 async def rescore_all_existing_claims(db: AsyncSession) -> int:
     """Standalone rescore, independent of clustering - NPR/Velocity can drift purely
@@ -299,12 +304,90 @@ async def rescore_all_existing_claims(db: AsyncSession) -> int:
     topics = list((await db.execute(select(Topic.id))).scalars().all())
     rescored = 0
     for topic_id in topics:
-        claims = await _renormalize_topic_reach(db, topic_id)
+        claims = await renormalize_topic_reach(db, topic_id)
         for claim in claims:
             await rescore_claim(db, claim)
             rescored += 1
     await db.commit()
     return rescored
+
+
+async def build_claim_from_content_items(
+    db: AsyncSession,
+    cluster_items: list[ContentItem],
+    llm: LLMClient,
+    embedder: EmbeddingService,
+) -> Claim:
+    """Creates one new EXISTING claim from a set of already-persisted, not-yet-clustered
+    ContentItems: summarizes the claim statement, assigns a dynamic Topic, classifies
+    every item's stance, classifies Harm once, and eagerly caches the Debunk Activity.
+
+    Shared by cluster_unclustered_content's Pass 2 (HDBSCAN-formed clusters) and
+    app.services.admin_service's "Generate Generic Claim" demo utility (US33), which
+    hands it a deterministic, LLM-fabricated cluster instead of an HDBSCAN one - the
+    claim-construction logic itself is identical either way."""
+    sample_texts = [item.text for item in cluster_items[:MAX_SAMPLE_TEXTS_FOR_SUMMARY]]
+    try:
+        summary = await llm.summarize_claim(sample_texts)
+        claim_statement, topic_label = summary.claim_statement, summary.topic_label
+    except Exception:
+        logger.exception("LLM claim summarization failed; using fallback statement")
+        claim_statement = sample_texts[0][:500]
+        topic_label = "General"
+
+    claim_embedding = embedder.embed(claim_statement)
+    topic = await assign_or_create_topic(db, claim_embedding, topic_label)
+
+    claim = Claim(
+        claim_type=ClaimType.EXISTING,
+        claim_statement=claim_statement,
+        topic_id=topic.id,
+        status=ClaimStatus.UNREVIEWED,
+        embedding=claim_embedding,
+        first_caught_at=min(item.created_at for item in cluster_items),
+    )
+    db.add(claim)
+    await db.flush()
+
+    try:
+        stances = await llm.classify_stances_batch(
+            claim_statement, [item.text for item in cluster_items]
+        )
+    except Exception:
+        logger.exception("Batch stance classification failed; falling back per-item")
+        stances = [
+            await llm.classify_stance(claim_statement, item.text) for item in cluster_items
+        ]
+
+    for item, stance in zip(cluster_items, stances, strict=True):
+        item.claim_id = claim.id
+        item.stance = stance
+        if stance == Stance.SUPPORTING:
+            await _increment_topic_volume_bucket(db, topic.id, item.created_at)
+
+    supporting_texts = [
+        item.text
+        for item, stance in zip(cluster_items, stances, strict=True)
+        if stance == Stance.SUPPORTING
+    ] or sample_texts
+    try:
+        harm = await llm.classify_harm(claim_statement, supporting_texts[:10])
+    except Exception:
+        logger.exception("Harm classification failed; leaving harm fields unset")
+    else:
+        claim.harm_public_safety = harm.public_safety
+        claim.harm_institutional_trust = harm.institutional_trust
+        claim.harm_economic = harm.economic
+        claim.harm_policy_disruption = harm.policy_disruption
+        claim.harm_score = scoring_engine.harm_score(
+            harm.public_safety,
+            harm.institutional_trust,
+            harm.economic,
+            harm.policy_disruption,
+        )
+
+    await generate_and_cache_debunk_activity(db, claim, llm, embedder)
+    return claim
 
 
 async def cluster_unclustered_content(
@@ -406,69 +489,8 @@ async def cluster_unclustered_content(
             if len(cluster_items) < MIN_CLUSTER_SIZE:
                 continue
 
-            sample_texts = [item.text for item in cluster_items[:MAX_SAMPLE_TEXTS_FOR_SUMMARY]]
-            try:
-                summary = await llm.summarize_claim(sample_texts)
-                claim_statement, topic_label = summary.claim_statement, summary.topic_label
-            except Exception:
-                logger.exception("LLM claim summarization failed; using fallback statement")
-                claim_statement = sample_texts[0][:500]
-                topic_label = "General"
-
-            claim_embedding = embedder.embed(claim_statement)
-            topic = await assign_or_create_topic(db, claim_embedding, topic_label)
-
-            claim = Claim(
-                claim_type=ClaimType.EXISTING,
-                claim_statement=claim_statement,
-                topic_id=topic.id,
-                status=ClaimStatus.UNREVIEWED,
-                embedding=claim_embedding,
-                first_caught_at=min(item.created_at for item in cluster_items),
-            )
-            db.add(claim)
-            await db.flush()
-
-            try:
-                stances = await llm.classify_stances_batch(
-                    claim_statement, [item.text for item in cluster_items]
-                )
-            except Exception:
-                logger.exception("Batch stance classification failed; falling back per-item")
-                stances = [
-                    await llm.classify_stance(claim_statement, item.text) for item in cluster_items
-                ]
-
-            for item, stance in zip(cluster_items, stances, strict=True):
-                item.claim_id = claim.id
-                item.stance = stance
-                if stance == Stance.SUPPORTING:
-                    await _increment_topic_volume_bucket(db, topic.id, item.created_at)
-
-            supporting_texts = [
-                item.text
-                for item, stance in zip(cluster_items, stances, strict=True)
-                if stance == Stance.SUPPORTING
-            ] or sample_texts
-            try:
-                harm = await llm.classify_harm(claim_statement, supporting_texts[:10])
-            except Exception:
-                logger.exception("Harm classification failed; leaving harm fields unset")
-            else:
-                claim.harm_public_safety = harm.public_safety
-                claim.harm_institutional_trust = harm.institutional_trust
-                claim.harm_economic = harm.economic
-                claim.harm_policy_disruption = harm.policy_disruption
-                claim.harm_score = scoring_engine.harm_score(
-                    harm.public_safety,
-                    harm.institutional_trust,
-                    harm.economic,
-                    harm.policy_disruption,
-                )
-
-            await generate_and_cache_debunk_activity(db, claim, llm, embedder)
-
-            touched_topic_ids.add(topic.id)
+            claim = await build_claim_from_content_items(db, cluster_items, llm, embedder)
+            touched_topic_ids.add(claim.topic_id)
             claims_created += 1
 
     if not touched_topic_ids:
@@ -478,7 +500,7 @@ async def cluster_unclustered_content(
     # --- Renormalize Reach per touched topic, then rescore every claim in it ---
     claims_to_rescore: dict[uuid.UUID, Claim] = {}
     for topic_id in touched_topic_ids:
-        for claim in await _renormalize_topic_reach(db, topic_id):
+        for claim in await renormalize_topic_reach(db, topic_id):
             claims_to_rescore[claim.id] = claim
 
     for claim in claims_to_rescore.values():

@@ -34,6 +34,7 @@ class ClaimListItemRead(BaseModel):
     positive_statement_count: int
     negative_statement_count: int
     final_claim_score: float | None  # D1 only; always None on D2 (never scored)
+    is_alerted: bool  # bell icon state (US14) - D1 only; always False on D2 (F3 is EXISTING-only)
 
 
 class ClaimListEnvelope(BaseModel):
@@ -43,6 +44,17 @@ class ClaimListEnvelope(BaseModel):
     fetched_at: datetime
     total: int
     items: list[ClaimListItemRead]
+
+
+class TopAccountEntry(BaseModel):
+    """US12's Top 5 Accounts panel - ranked by post-volume contribution to this claim's
+    Supporting side. INTERPRETATION FLAGGED by the PRD itself as an assumption pending
+    PM confirmation (top 5 driving/spreading vs. opposing vs. engagement vs. bot-like) -
+    implemented here as "top 5 accounts driving/spreading the claim" per the PRD's own
+    stated interpretation; revisit if the PM confirms a different reading."""
+
+    account_handle: str
+    contribution_count: int
 
 
 class ExistingClaimDetailRead(BaseModel):
@@ -78,10 +90,12 @@ class ExistingClaimDetailRead(BaseModel):
     discount_factor: float | None
     final_claim_score: float | None
     is_dormant: bool
+    is_alerted: bool
 
     activity_content: str | None
     activity_generated_at: datetime | None
 
+    top_accounts: list[TopAccountEntry]
     supporting_statements: list[ContentItemRead]
     opposing_statements: list[ContentItemRead]
     neutral_statements: list[ContentItemRead]
@@ -129,8 +143,11 @@ class RescoreResponse(BaseModel):
 
 
 class NonExistingClaimPredictRequest(BaseModel):
-    policy_title: str = Field(min_length=1)
-    policy_description: str = Field(min_length=1)
+    """Manual/ad-hoc prediction trigger for an already-registered F2 policy - the
+    automatic path is the AI matchmaking pipeline (US42), which runs on policy
+    creation without needing this endpoint at all."""
+
+    policy_id: uuid.UUID
 
 
 class NonExistingClaimPredictResponse(BaseModel):

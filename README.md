@@ -1,9 +1,25 @@
 # CIS AI Service
 
-Backend for **CIS (Climate Immune System)**'s Claim Repository Bank (PRD v1.1, F1): detects
-and scores climate-misinformation **Claims** circulating in public discourse (Existing
-claims), predicts claims that might emerge ahead of a policy announcement (Non-Existing
-claims), and drafts a structured Debunk/Prebunk Activity for each.
+Backend for **CIS (Climate Immune System)** (PRD v1.3, F1-F4): detects and scores
+climate-misinformation **Claims** circulating in public discourse (Existing/Generic claims),
+predicts claims that might emerge ahead of a policy announcement (Non-Existing/Synthetic
+claims), drafts a structured Debunk/Prebunk Activity for each, and automatically links every
+newly-registered **Public Policy** to the claims it relates to via an AI matchmaking pipeline
+(F2). Also covers the F3 Alert watchlist and F4 admin/threshold config. F5 (Coordinated-Network
+Detector) is out of scope per the PRD - `/coordination/check-cib` is kept as a standalone
+capability from the earlier design, ahead of F5's own future spec.
+
+> **Integration note (2026-08-31 demo):** the real request path is **FE -> Go backend -> this
+> service**. For now this service owns full persistence for everything (claims, topics,
+> policies, alerts, admin_settings) and Go is treated as a thin proxy in front of it - that was
+> an explicit, temporary call to hit the deadline, not a confirmed final architecture. Several
+> pieces built here (F3 Alert CRUD, F4 Admin threshold CRUD, F2's file upload/storage/list/
+> search/download) have no actual AI/ML in them and are natural Go-backend territory; only the
+> AI-specific parts (embeddings, LLM calls, clustering, the Claim Scoring System, F2's
+> matchmaking step) strictly need to live here. **Re-check this split during integration** -
+> if Go ends up owning its own persistence for the non-AI pieces, those endpoints need to
+> become closer to stateless compute (accept input, return AI-derived output, let Go persist
+> it) instead of full CRUD owners.
 
 - **Framework:** FastAPI + Uvicorn, Pydantic v2
 - **DB/ORM:** SQLAlchemy 2.0 (async, `asyncpg`) against Supabase Postgres with `pgvector`
@@ -202,6 +218,17 @@ curl -X POST http://localhost:8000/api/v1/ingest/batch \
       }'
 ```
 
+Live crawling isn't wired up for this prototype - a scheduler would normally feed `/ingest`.
+Until then, `/ingest/generate-synthetic` fabricates realistic Jakarta posts via the LLM and
+runs them through the exact same embed + analyze + persist pipeline (meant to be triggered
+on demand, e.g. a "Generate sample data" button in the FE):
+
+```bash
+curl -X POST http://localhost:8000/api/v1/ingest/generate-synthetic \
+  -H "Content-Type: application/json" \
+  -d '{"count": 10, "topic_hint": null, "auto_cluster": true}'
+```
+
 ### Claims - D1 Existing (ranked, scored)
 
 ```bash
@@ -222,15 +249,25 @@ curl -X PATCH http://localhost:8000/api/v1/claims/{claim_id}/harm/confirm \
   -H "Content-Type: application/json" -d '{"public_safety": 90.0}'
 ```
 
+Claim `status` is a single shared 4-value set for both claim types (PRD v1.3 merged the old
+type-specific Prebunk/Debunk into one shared value): `unreviewed`, `active`, `inactive`,
+`action_taken`.
+
+Bell-icon watchlist toggle (Existing claims only - see F3 below):
+
+```bash
+curl -X POST http://localhost:8000/api/v1/claims/{claim_id}/alert      # add to watchlist
+curl -X DELETE http://localhost:8000/api/v1/claims/{claim_id}/alert    # remove from watchlist
+```
+
 ### Claims - D2 Non-Existing (predicted, unscored)
 
 ```bash
+# policy_id must reference an already-registered F2 policy (see below) - the automatic
+# path is F2's AI matchmaking pipeline, which predicts claims on policy creation without
+# needing this endpoint at all. This is the manual/ad-hoc trigger.
 curl -X POST http://localhost:8000/api/v1/claims/non-existing/predict \
-  -H "Content-Type: application/json" \
-  -d '{
-        "policy_title": "Kampung Pulo Housing Redevelopment",
-        "policy_description": "The city will renovate public housing in Kampung Pulo along the Ciliwung riverbank, funded by the existing housing budget with no planned displacement."
-      }'
+  -H "Content-Type: application/json" -d '{"policy_id": "<policy-uuid>"}'
 
 curl http://localhost:8000/api/v1/claims/non-existing
 ```
@@ -249,32 +286,117 @@ curl -X POST http://localhost:8000/api/v1/coordination/check-cib \
       }'
 ```
 
-### Topics & Policies
+### Topics
 
 ```bash
 curl http://localhost:8000/api/v1/topics
 curl -X POST http://localhost:8000/api/v1/topics -d '{"name": "Road Pricing & Transit"}'
-
-curl http://localhost:8000/api/v1/policies
-curl -X POST http://localhost:8000/api/v1/policies -d '{"title": "ERP Road Pricing Expansion"}'
 ```
+
+### F2 - Public Policy Bank
+
+Creating a policy is `multipart/form-data` (file upload), not JSON - the only 3 fields
+the "Add Public Policy" modal collects (US40). `rolled_out_date` is a plain `YYYY-MM-DD`.
+`status` (`rolled_out` / `not_rolled_out`) is derived from `rolled_out_date` vs. wall-clock
+time on every read - never a stale stored flag.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/policies \
+  -F "file=@policy.pdf" \
+  -F "name=MRT Fase 2 Bundaran HI-Kota Extension" \
+  -F "rolled_out_date=2026-12-01"
+```
+
+The response returns immediately with `"processing": true` - creation kicks off the **AI
+matchmaking pipeline** (US42) in the background: it embeds the policy (title + description +
+extracted document text), links any Existing claims that an LLM confirms are genuinely about
+this policy (many-to-many), and predicts one new Non-Existing claim for whatever the policy
+covers that isn't already matched (one-to-many). Poll the detail endpoint until
+`"processing": false`:
+
+```bash
+curl http://localhost:8000/api/v1/policies/{policy_id}          # correlated claim lists once processing completes
+curl http://localhost:8000/api/v1/policies/{policy_id}/file     # download the original uploaded document
+
+curl "http://localhost:8000/api/v1/policies?years=2026&years=2025"   # multi-select year filter
+curl "http://localhost:8000/api/v1/policies?q=ERP"                    # search by policy name
+```
+
+### F3 - Alert Page (watchlist)
+
+Existing claims only - added/removed via the bell icon on `/claims/{claim_id}/alert` (see
+above), never directly here.
+
+```bash
+curl http://localhost:8000/api/v1/alerts                                    # [C3] watchlist table
+curl "http://localhost:8000/api/v1/alerts?q=hidden+tax"                     # search by claim text
+
+# [C1]/[C2] - FinalClaimScore trend for whichever watched claims are currently checked in the FE
+curl "http://localhost:8000/api/v1/alerts/chart?claim_ids=<id1>&claim_ids=<id2>&granularity=week"
+```
+
+`threshold_status` (`over_threshold` / `under_threshold`) on each watchlist row is derived by
+comparing the claim's `final_claim_score` against the single global threshold set via F4.
+
+### F4 - Admin Setting Page
+
+```bash
+curl http://localhost:8000/api/v1/admin/settings
+curl -X PUT http://localhost:8000/api/v1/admin/settings -d '{"over_threshold": 70.0}'
+
+# One-click, fully-scored sample Existing claim for demo/testing (US33) - fabricates a
+# small internally-consistent post cluster via the LLM and runs it through the exact same
+# claim-construction + scoring pipeline real clustering uses.
+curl -X POST http://localhost:8000/api/v1/admin/generate-generic-claim
+```
+
+## Known assumptions / gaps (PRD v1.3)
+
+- **US12 "Top 5 Accounts" interpretation**: the PRD itself flags this as an unconfirmed
+  assumption. Implemented here as "top 5 accounts by post-volume contribution to the claim's
+  Supporting side" (the PRD's own stated reading) - revisit if the PM confirms a different
+  interpretation (e.g. top 5 opposing, by engagement, or bot-like).
+- **Policy file storage**: uploaded documents are stored inline in Postgres (`bytea`), not a
+  separate object-storage bucket - a deliberate MVP simplification (no other storage
+  credentials configured), fine at demo scale but worth revisiting before real production load.
+- **F2 AI matchmaking** currently predicts exactly one new Non-Existing claim per policy (the
+  PRD allows "one or more"); the existing-claim match step is a cosine-similarity prefilter
+  (threshold 0.35) followed by one batched LLM confirmation call, not a full pairwise LLM
+  review of every claim in the databank.
+- **F5 Coordinated-Network Detector** is explicitly out of scope in PRD v1.3 (placeholder only);
+  `/coordination/check-cib` remains available from the earlier design but isn't part of the
+  current F1-F4 spec.
 
 ## Verified
 
 - Live-tested end-to-end against the real Supabase Postgres instance: `reset_schema.py`
-  drops/recreates all 8 tables cleanly, `seed_demo_data.py` runs the full pipeline with a real
-  OpenAI key - 4 Existing claims correctly scored and ranked, 2 Non-Existing claims correctly
-  predicted and left unscored, 5 topics formed dynamically (including a Non-Existing
-  prediction correctly matching into an existing Existing-claim topic).
-- All 15 API routes registered and smoke-tested via a live server against real data.
-- 96 automated tests passing (unit + integration against a live pgvector container), ruff
+  drops/recreates all tables cleanly (queries `pg_tables` directly, so it can't leave orphaned
+  tables behind the way relying on `Base.metadata.drop_all()` alone can), `seed_demo_data.py`
+  runs the full pipeline with a real OpenAI key.
+- F2's AI matchmaking pipeline live-tested against the real DB/LLM: uploading a policy document
+  correctly linked an existing matching claim and predicted a genuinely distinct (non-duplicate)
+  new Non-Existing claim, both persisted correctly, `processing` flipping to `false` once done.
+- F3 (alert add/remove, watchlist, threshold-status derivation, score-history chart) and F4
+  (global threshold, one-click fully-scored demo claim generation) smoke-tested end-to-end
+  against the real DB/LLM.
+- 99 automated tests passing (unit + integration against a live pgvector container), ruff
   clean. Coverage includes: the full Claim Scoring System's edge cases (dormant/below-
   reliability-threshold NPR, missing-Falseness weight renormalization, numerically-stable
-  Velocity z-score), the claim-type/status business rule (both directions, via HTTP 422),
-  stance classification never defaulting on LLM failure, dynamic topic formation/merging, the
-  Dashboard Transparency Requirement (every score component present, never just the collapsed
-  number), and the CIB detector isolating a coordinated bot pair from a genuine post.
-- Found and fixed two real bugs during verification: a numeric overflow in the Velocity
+  Velocity z-score), the shared status model working uniformly across both claim types, stance
+  classification never defaulting on LLM failure, dynamic topic formation/merging, the Score
+  Transparency Requirement (every score component present, never just the collapsed number),
+  the CIB detector isolating a coordinated bot pair from a genuine post, and F2's create/list/
+  detail/download/matchmaking flow (including a real, valid in-memory `.docx` round-trip
+  through the actual PDF/Word text-extraction parser, not a mocked one).
+- Found and fixed a real cross-cutting bug during this build: the F2 AI matchmaking
+  BackgroundTasks job originally imported `AsyncSessionLocal` directly, which would have
+  silently pointed at the real production database during tests instead of the test database
+  (background tasks can't use a request-scoped `Depends(get_db)`, which is how every other
+  test-vs-prod DB split in this codebase works). Fixed via a new overridable
+  `get_session_factory()` indirection in `app/core/database.py`, threaded through
+  `BackgroundTasks.add_task(...)` and overridden in `tests/conftest.py` the same way `get_db`
+  already is.
+- Also found and fixed (pre-PRD-v1.3 work, still relevant): a numeric overflow in the Velocity
   z-score's sigmoid squash for large negative inputs, and a Windows-specific text-encoding
   corruption (`locale.getpreferredencoding()` defaulting to `cp1252`) that mangled non-ASCII
   characters in LLM-generated text before storage - fixed for the Docker image via

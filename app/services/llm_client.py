@@ -16,8 +16,11 @@ from app.schemas.analysis import (
     DebunkContentSchema,
     HarmClassificationSchema,
     NonExistingClaimPredictionSchema,
+    PolicyClaimMatchBatchSchema,
     StanceBatchSchema,
     StanceSchema,
+    SyntheticPostBatchSchema,
+    SyntheticPostSchema,
 )
 
 logger = logging.getLogger(__name__)
@@ -170,6 +173,56 @@ fault lines, similar precedents), produce:
   policy context, calm in tone, and addressing the likely concern head-on without \
   repeating inflammatory false framing. This becomes the claim's Prebunk Activity - the \
   actual publishable content.
+"""
+
+SYNTHETIC_POSTS_SYSTEM_PROMPT = """\
+You are simulating realistic public social/forum posts for a Jakarta civic \
+misinformation-monitoring prototype. Live crawling is not wired up yet for this demo - \
+you are generating plausible synthetic posts that stand in for what a real crawler would \
+have ingested, so the pipeline has realistic data to work with end-to-end.
+
+Generate a diverse batch of short posts (1-3 sentences each) about Jakarta urban/climate \
+policy topics (e.g. ERP road pricing, MRT construction, flood control / Ciliwung \
+normalization, waste management, tree removal, land subsidence, coastal reclamation), \
+written the way real Jakarta residents would actually post.
+
+Write every post in English, even though real Jakarta residents would often write in \
+Bahasa Indonesia - the embedding model powering this system is English-only, so non-English \
+text degrades clustering/matching quality. Keep real Jakarta place/policy names as-is.
+
+Mix the posts realistically across the batch:
+- Some posts spread an unverified or exaggerated claim as fact.
+- Some posts express a genuine, calm concern or question.
+- Some posts push back on, correct, or mock another claim or rumor.
+- Some posts are neutral commentary or observations.
+
+For each post, invent:
+- text: the post content itself (casual tone, may include minor typos/slang, no hashtag \
+  spam, no markdown).
+- source: which platform it plausibly came from ("social", "forum", "rss", or "radio" \
+  for a transcript excerpt - use "other" only if nothing else fits).
+- author_id: a plausible fake handle/username (never a real person's name).
+- location: a real Jakarta neighborhood or landmark relevant to the post's topic, or null \
+  if not applicable.
+
+If grounding context (existing community fault lines and/or active topics) is provided, \
+lean some - not all - of the posts toward continuing those specific threads for realistic \
+continuity; the rest should range freely across other plausible Jakarta topics.
+
+Return exactly the requested number of posts.
+"""
+
+POLICY_CLAIM_MATCH_SYSTEM_PROMPT = """\
+You are deciding, for a city government's Claim Repository Bank, which already-tracked
+misinformation claims are genuinely ABOUT a specific public policy - not merely adjacent
+in topic.
+
+Given a policy's title/description and a numbered list of candidate claim statements,
+return one boolean per claim, in the exact same order: true only if the claim is
+specifically about this policy (would a reasonable policy owner say "yes, this claim is
+about my policy"?), false if it is about a different, merely topically-related policy or
+subject. Err toward false when genuinely unsure - a missed link is far less costly than
+a wrong one polluting the policy's claim list.
 """
 
 
@@ -327,6 +380,52 @@ class LLMClient:
             system_instruction=NON_EXISTING_CLAIM_PREDICTION_SYSTEM_PROMPT,
             schema=NonExistingClaimPredictionSchema,
         )
+
+    async def generate_synthetic_posts(
+        self, count: int, topic_hint: str | None, grounding_context: str
+    ) -> list[SyntheticPostSchema]:
+        """Fabricate `count` realistic 'crawled' posts to stand in for a not-yet-wired-up
+        live crawler (prototype/demo use only). Callers still run each result through the
+        normal ingest pipeline (embed + analyze_content) - only the raw post is synthetic."""
+        prompt = (
+            f"Number of posts to generate: {count}\n"
+            f"Topic focus (optional steer, blank = your judgement across realistic "
+            f"Jakarta urban/climate topics): {topic_hint or 'None - use your judgement'}\n\n"
+            f"Grounding context (existing community fault lines / active topics, for "
+            f"continuity - optional):\n{grounding_context or 'None provided.'}"
+        )
+        result = await self._generate_structured(
+            prompt=prompt,
+            system_instruction=SYNTHETIC_POSTS_SYSTEM_PROMPT,
+            schema=SyntheticPostBatchSchema,
+        )
+        return result.posts
+
+    async def confirm_policy_claim_matches(
+        self, policy_title: str, policy_description: str, candidate_claim_statements: list[str]
+    ) -> list[bool]:
+        """F2 AI matchmaking (US42a): confirms which candidate Existing claims are
+        genuinely about `policy_title`. Raises ValueError if the result can't be zipped
+        1:1 with candidate_claim_statements - the caller must not silently misalign."""
+        numbered = "\n".join(
+            f"{i + 1}. {statement}" for i, statement in enumerate(candidate_claim_statements)
+        )
+        prompt = (
+            f"Policy title: {policy_title}\n"
+            f"Policy description:\n{policy_description or 'None provided.'}\n\n"
+            f"Candidate claims:\n{numbered}"
+        )
+        result = await self._generate_structured(
+            prompt=prompt,
+            system_instruction=POLICY_CLAIM_MATCH_SYSTEM_PROMPT,
+            schema=PolicyClaimMatchBatchSchema,
+        )
+        if len(result.matches) != len(candidate_claim_statements):
+            raise ValueError(
+                f"Expected {len(candidate_claim_statements)} match booleans, "
+                f"got {len(result.matches)}"
+            )
+        return result.matches
 
 
 @lru_cache

@@ -1,7 +1,10 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
+
+from app.models.enums import PolicyStatus
+from app.schemas.claim import ClaimListItemRead
 
 
 class PolicyRead(BaseModel):
@@ -10,12 +13,18 @@ class PolicyRead(BaseModel):
     id: uuid.UUID
     title: str
     description: str | None
+    rolled_out_date: date
+    status: PolicyStatus
+    file_name: str | None
+    processing: bool
     created_at: datetime
 
 
-class PolicyCreate(BaseModel):
-    """Minimal manual creation - F2 (Public Policy Bank) is out of scope; this exists
-    only so claims have something to correlate to (see app.models.policy.Policy)."""
+class PolicyListResult(BaseModel):
+    total: int
+    items: list[PolicyRead]
 
-    title: str = Field(min_length=1, max_length=255)
-    description: str | None = None
+
+class PolicyDetailRead(PolicyRead):
+    existing_claims: list[ClaimListItemRead]
+    non_existing_claims: list[ClaimListItemRead]

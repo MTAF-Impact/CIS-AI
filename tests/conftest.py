@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 import app.models  # noqa: F401 - registers all ORM models on Base.metadata
-from app.core.database import Base, get_db
+from app.core.database import Base, get_db, get_session_factory
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.llm_client import get_llm_client
 from tests.fakes import FakeLLMClient
@@ -98,6 +98,10 @@ async def client(
             yield session
 
     app.dependency_overrides[get_db] = _override_get_db
+    # BackgroundTasks jobs (e.g. the F2 AI matchmaking pipeline) can't use a
+    # request-scoped Depends(get_db) - they run after the request's session is closed -
+    # so they take their session factory via this separate overridable indirection.
+    app.dependency_overrides[get_session_factory] = lambda: request_session_maker
     app.dependency_overrides[get_llm_client] = FakeLLMClient
     app.dependency_overrides[get_embedding_service] = lambda: real_embedder
 
