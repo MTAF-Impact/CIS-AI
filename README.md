@@ -10,42 +10,43 @@ Detector) is out of scope per the PRD - `/coordination/check-cib` is kept as a s
 capability from the earlier design, ahead of F5's own future spec.
 
 > **Integration note (2026-08-31 demo):** the real request path is **FE -> Go backend -> this
-> service**, and as of 2026-08-30 they share **the same Supabase Postgres database**. The Go
-> backend owns its own tables, all prefixed `cis_` (`cis_users`, `cis_refresh_tokens`,
-> `cis_settings`, `cis_policies`, `cis_claim_alerts`, `cis_claim_reviews`,
-> `cis_claim_score_snapshots`) - this service must **never** touch those tables except via the
-> deliberate dual-writes below (`scripts/reset_schema.py` explicitly excludes anything prefixed
-> `cis_` from its drop step).
+> service**. Both share **the same Supabase Postgres database**, but per the Go team's
+> documented contract (`docs/AI-INTEGRATION.md`, `docs/DATABASE.md`,
+> `docs/api/internal.md` in the CIS-Backend repo), **the DB itself is never the
+> integration surface** - it's SELECT-only in both directions:
 >
-> This service still owns full persistence for its own domain (claims, topics, policies,
-> alerts, admin_settings) - Go's `cis_*` tables largely mirror a subset of that data for the
-> FE, so **every write this service makes that has a Go-side counterpart is dual-written** via
-> `app/services/go_backend_sync.py`, best-effort and never allowed to fail the primary write
-> (each dual-write runs in its own `SAVEPOINT`):
+> - This service owns `claims`, `content_items`, `topics`, `policies`, `claim_policies`,
+>   `topic_volume_buckets`, `fault_lines`, `official_sources` - the backend only ever
+>   SELECTs from them (a startup guard on its side refuses to boot if any of its own
+>   AutoMigrate models ever touches a non-`cis_` table).
+> - The backend owns every `cis_*` table (`cis_users`, `cis_refresh_tokens`, `cis_policies`,
+>   `cis_claim_reviews`, `cis_claim_alerts`, `cis_claim_score_snapshots`, `cis_settings`) -
+>   **this service must never write to any of them** (`scripts/reset_schema.py` also
+>   excludes anything prefixed `cis_` from its drop step, so it can never destroy Go's
+>   tables either). An earlier version of this integration dual-wrote into `cis_*`
+>   directly - that was wrong and has been removed; `cis_claim_reviews` in particular is
+>   deliberately the backend's own overlay so a pipeline re-run here can never silently
+>   clobber a human reviewer's decision.
 >
-> | This service writes | Also dual-written to | Trigger |
-> |---|---|---|
-> | `Claim.status` | `cis_claim_reviews` (upsert by `claim_id`) | claim creation (initial `unreviewed`), `PATCH /claims/{id}/status` |
-> | `ClaimAlert` add/remove | `cis_claim_alerts` | `POST`/`DELETE /claims/{id}/alert` |
-> | `ClaimScoreSnapshot` (final score only) | `cis_claim_score_snapshots` (full R/V/F/H/EI/NPR/discount breakdown) | every `rescore_claim()` call (clustering, standalone rescore, harm confirm) |
-> | `AdminSetting.over_threshold` | `cis_settings` (`key='alert_threshold'`, upsert) | `PUT /admin/settings` |
+> Coordination instead happens over exactly 3 HTTP touchpoints:
 >
-> **Not yet wired: `cis_policies`.** Its shape (`file_path`/`file_mime_type`/`file_size_bytes`,
-> `processing_status`/`processing_error`/`processing_attempts`, and an `ai_policy_id`
-> back-reference) describes a different workflow than a simple mirror: Go owns the upload and
-> file storage, and expects this service to react to a `cis_policies` row and write back
-> `ai_policy_id` + `processing_status` once matchmaking finishes - not receive the file
-> directly the way `POST /policies` currently does. This needs an explicit handoff contract
-> with the Go team (how do we get notified of a new `cis_policies` row - a direct call passing
-> its id, or do we poll for `processing_status='pending'`? where does `file_path` actually
-> point?) before it's safe to implement - confirm this first during integration.
+> | # | Flow | Direction | Endpoint |
+> |---|---|---|---|
+> | 1 | Policy matchmaking (US42) | Backend -> AI | `POST /api/v1/matchmaking/policies` (`app/api/v1/endpoints/matchmaking.py`) |
+> | 2 | Matchmaking result | AI -> Backend | `POST {BACKEND_URL}/api/v1/internal/policies/{id}/matchmaking-result` (`app/services/backend_callback_service.py`) |
+> | 3 | Generate Generic Claim (US33, F4 test button) | Backend -> AI | `POST /api/v1/claims/generate-generic` (`app/api/v1/endpoints/claims.py`) |
 >
-> Beyond that, several pieces built here (F3 Alert CRUD, F4 Admin threshold CRUD, F2's file
-> upload/storage/list/search/download) have no actual AI/ML in them and are natural
-> Go-backend territory now that `cis_*` tables for them already exist - only the AI-specific
-> parts (embeddings, LLM calls, clustering, the Claim Scoring System, F2's matchmaking step)
-> strictly need to live here. Re-check this split during integration rather than assuming the
-> current "both sides persist, dual-written" arrangement is the final shape.
+> Flow 1 replaces this service's own `POST /policies` file-upload path for production use:
+> the backend now owns policy upload/storage and sends metadata + a signed `document_url`
+> instead. This service creates its own `Policy` row, runs the same matchmaking pipeline
+> (`app/services/policy_matchmaking_service.py`), and always reports back via Flow 2 -
+> success or failure - with its own `Policy.id` as `ai_policy_id`, which the backend joins
+> every claim<->policy correlation through. `POST /policies` (multipart upload) still works
+> for local testing/demos, just isn't what the backend calls.
+>
+> Both `AI_SERVICE_API_KEY` (inbound, checked by `app/core/security.py`) and
+> `INTERNAL_API_KEY` (outbound, sent as `X-Internal-Key`) are optional shared secrets -
+> unset by default, matching the current private-network-only deployment.
 
 - **Framework:** FastAPI + Uvicorn, Pydantic v2
 - **DB/ORM:** SQLAlchemy 2.0 (async, `asyncpg`) against Supabase Postgres with `pgvector`

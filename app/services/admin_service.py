@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.admin_setting import SINGLETON_ID, AdminSetting
 from app.models.claim import Claim
 from app.schemas.content import ContentItemCreate
-from app.services import clustering_service, go_backend_sync
+from app.services import clustering_service
 from app.services.content_ingestion_service import (
     analyze_and_build_item,
     build_grounding_context,
@@ -32,7 +32,6 @@ async def get_settings(db: AsyncSession) -> AdminSetting:
 async def set_threshold(db: AsyncSession, over_threshold: float) -> AdminSetting:
     settings = await get_settings(db)
     settings.over_threshold = over_threshold
-    await go_backend_sync.sync_admin_threshold(db, over_threshold)
     await db.commit()
     await db.refresh(settings)
     return settings

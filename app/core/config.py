@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_JSON: bool | None = None
 
+    # Go backend integration (see docs/AI-INTEGRATION.md in the CIS-Backend repo - the
+    # shared Postgres DB is read-only from this side; all coordination is these 3 HTTP
+    # touchpoints). Both keys are optional shared secrets, empty by default (private
+    # network only, no key exchanged) - see that doc's "Configuration" section.
+    BACKEND_URL: str = ""  # e.g. https://cis-backend-465014351308.europe-west1.run.app
+    AI_SERVICE_API_KEY: str = ""  # validates inbound X-API-Key from the backend, if set
+    INTERNAL_API_KEY: str = ""  # sent as X-Internal-Key on our callback to the backend, if set
+
     @property
     def is_production(self) -> bool:
         return self.ENV.lower() in {"prod", "production"}

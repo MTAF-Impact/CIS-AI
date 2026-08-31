@@ -17,6 +17,9 @@ engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.LOG_LEVEL.upper() == "DEBUG",
     pool_pre_ping=True,
+    # Supabase's transaction-mode pooler (PgBouncer) doesn't support asyncpg's named
+    # prepared statements - harmless to disable against a direct connection too.
+    connect_args={"statement_cache_size": 0},
 )
 
 AsyncSessionLocal = async_sessionmaker(

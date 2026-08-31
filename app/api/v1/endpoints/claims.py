@@ -7,11 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
+from app.core.security import verify_backend_api_key
 from app.models.alert import ClaimAlert
 from app.models.claim import Claim
 from app.models.content import ContentItem
 from app.models.enums import ClaimStatus, ClaimType, Stance
 from app.models.policy import ClaimPolicy, Policy
+from app.models.topic import Topic
 from app.schemas.claim import (
     ClaimListEnvelope,
     ClaimListItemRead,
@@ -28,7 +30,11 @@ from app.schemas.claim import (
     TopicBrief,
 )
 from app.schemas.content import ContentItemRead
-from app.services import go_backend_sync, scoring_engine
+from app.schemas.matchmaking import (
+    GenerateGenericClaimWebhookRequest,
+    GenerateGenericClaimWebhookResponse,
+)
+from app.services import admin_service, scoring_engine
 from app.services.claim_prediction_service import predict_non_existing_claim
 from app.services.clustering_service import (
     cluster_unclustered_content,
@@ -41,6 +47,13 @@ from app.services.llm_client import LLMClient, LLMNotConfiguredError, get_llm_cl
 router = APIRouter(prefix="/claims", tags=["claims"])
 
 TOP_ACCOUNTS_LIMIT = 5
+
+# docs/AI-INTEGRATION.md's claim_type vocabulary table - aliases accepted for the
+# EXISTING/Generic claim type on the Flow 3 generate-generic webhook. Non-existing/
+# Synthetic claims are never generated here (they require a Policy, see
+# claim_prediction_service.predict_non_existing_claim); an unrecognized value is
+# rejected outright rather than silently coerced.
+GENERIC_CLAIM_TYPE_ALIASES = frozenset({"existing", "generic", "existing_claim", "generic_claim"})
 
 
 async def _statement_counts(db: AsyncSession, claim_id: uuid.UUID) -> tuple[int, int]:
@@ -270,6 +283,50 @@ async def rescore(db: AsyncSession = Depends(get_db)) -> RescoreResponse:
     return RescoreResponse(claims_rescored=count)
 
 
+@router.post(
+    "/generate-generic",
+    response_model=GenerateGenericClaimWebhookResponse,
+    status_code=201,
+    dependencies=[Depends(verify_backend_api_key)],
+)
+async def generate_generic_claim_webhook(
+    payload: GenerateGenericClaimWebhookRequest,
+    db: AsyncSession = Depends(get_db),
+    llm: LLMClient = Depends(get_llm_client),
+    embedder: EmbeddingService = Depends(get_embedding_service),
+) -> GenerateGenericClaimWebhookResponse:
+    """Flow 3 of the Go backend integration contract (docs/AI-INTEGRATION.md in the
+    CIS-Backend repo) - the F4 "Generate Generic Claim" test button. Distinct from
+    admin.generate_generic_claim (our own richer, full-detail admin-panel response);
+    this returns exactly the minimal shape the backend's doc specifies."""
+    if payload.claim_type is not None and payload.claim_type.lower() not in GENERIC_CLAIM_TYPE_ALIASES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported claim_type {payload.claim_type!r}; this endpoint only "
+            "generates Existing/Generic claims",
+        )
+
+    target_topic = None
+    if payload.topic_id is not None:
+        target_topic = await db.get(Topic, payload.topic_id)
+        if target_topic is None:
+            raise HTTPException(status_code=404, detail="Topic not found")
+
+    try:
+        claim = await admin_service.generate_demo_existing_claim(db, llm, embedder)
+    except LLMNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if target_topic is not None:
+        claim.topic_id = target_topic.id
+        await db.commit()
+        await db.refresh(claim)
+
+    return GenerateGenericClaimWebhookResponse(
+        claim_id=claim.id, claim_statement=claim.claim_statement, topic_id=claim.topic_id
+    )
+
+
 @router.post("/non-existing/predict", response_model=NonExistingClaimPredictResponse, status_code=201)
 async def predict(
     payload: NonExistingClaimPredictRequest,
@@ -315,7 +372,6 @@ async def update_status(
         raise HTTPException(status_code=404, detail="Claim not found")
 
     claim.status = payload.status
-    await go_backend_sync.sync_claim_review_status(db, claim.id, claim.status)
     await db.commit()
 
     claim = await _fetch_claim_with_relations(db, claim_id)
@@ -367,7 +423,6 @@ async def add_alert(claim_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> 
 
     if await db.get(ClaimAlert, claim_id) is None:
         db.add(ClaimAlert(claim_id=claim_id))
-        await go_backend_sync.sync_claim_alert_added(db, claim_id)
         await db.commit()
 
     claim = await _fetch_claim_with_relations(db, claim_id)
@@ -384,7 +439,6 @@ async def remove_alert(claim_id: uuid.UUID, db: AsyncSession = Depends(get_db)) 
     alert = await db.get(ClaimAlert, claim_id)
     if alert is not None:
         await db.delete(alert)
-        await go_backend_sync.sync_claim_alert_removed(db, claim_id)
         await db.commit()
 
     return await _to_list_item(db, claim, is_alerted=False)
