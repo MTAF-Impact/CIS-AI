@@ -115,22 +115,69 @@ posts - one stance per post, same count as posts given.
 
 HARM_CLASSIFICATION_SYSTEM_PROMPT = """\
 You are assessing the potential real-world harm of a false or misleading claim for a \
-city government risk-triage system, BEFORE a human reviewer confirms your assessment.
+city government risk-triage system, BEFORE a human reviewer confirms your assessment. \
+Every score must be defensible to a non-technical policy reviewer, so anchor your score \
+to the band descriptions below rather than an impressionistic 0-100 guess.
 
-Score each dimension 0-100:
-- public_safety: risk of physical harm, panic, or dangerous behavior resulting from the \
-  claim (e.g. false hazard/evacuation information). 0 = no safety risk, 100 = severe.
-- institutional_trust: the claim's potential to erode public trust in government \
-  competence or intent, independent of any single policy. 0 = none, 100 = severe.
-- economic: potential financial harm (e.g. property value panic, business impact, \
-  market disruption). 0 = none, 100 = severe.
-- policy_disruption: how much the claim undermines a specific active policy rollout. \
-  Score this conservatively and narrowly - only the claim's effect on policy execution, \
-  NOT general criticism or disagreement with the policy itself. A claim that is simply \
-  unflattering to a policy is not automatically high on this dimension; only score high \
-  if the claim would concretely obstruct or derail implementation (e.g. inciting active \
-  boycotts/interference), since a government tool must not treat ordinary criticism of \
-  its own policy as "harm".
+Score each dimension 0-100, using this rubric (PRD v1.3.1 Section 6.2.4):
+
+public_safety - risk of physical harm, panic, or dangerous behavior:
+  0-20    No physical safety implication. Purely informational/opinion-based, no
+          actionable instruction, warning, or safety-related assertion.
+  21-40   Minimal. References a safety-adjacent topic (infrastructure, health,
+          environment) but suggests no specific danger, action, or behavior change.
+  41-60   Moderate. Could plausibly influence individual behavior into minor risk
+          (e.g. discourages use of a safe facility) but no imminent/specific hazard.
+  61-80   High. Contains a specific false warning, alleged hazard, or instruction that
+          could lead people to take a risky action (false contamination warning, fake
+          evacuation advisory, incorrect emergency guidance) without immediate
+          life-threatening urgency.
+  81-100  Severe. Directly incites panic, dangerous mass behavior, or physical
+          confrontation, or spreads false emergency/life-safety information (fake
+          disaster alert, incitement to violence, dangerous health misinformation
+          with immediate risk of harm).
+
+institutional_trust - erosion of public trust in government competence/intent:
+  0-20    No implication. Does not reference government competence, integrity, intent.
+  21-40   Minimal. Mentions a government body/official neutrally, no alleged
+          wrongdoing, incompetence, or bad faith.
+  41-60   Moderate. Alleges a specific instance of error, inefficiency, or poor
+          judgment, but does not generalize to intent, corruption, or systemic failure.
+  61-80   High. Alleges deliberate deception, hidden agenda, or corruption by a
+          specific body/official, likely to reduce confidence in that institution.
+  81-100  Severe. Asserts broad, systemic conspiracy, malicious intent, or fundamental
+          illegitimacy (e.g. "the government is lying to control/harm citizens"),
+          able to erode trust across multiple institutions or government as a whole.
+
+economic - potential financial harm:
+  0-20    No implication. No plausible connection to financial behavior, markets,
+          property, or commerce.
+  21-40   Minimal. References an economic topic (prices, jobs, business) without
+          asserting a specific negative financial outcome or urging economic action.
+  41-60   Moderate. Could influence localized/small-scale financial behavior (e.g.
+          discourage patronage of one business) without broad market effect.
+  61-80   High. Could plausibly trigger a meaningful financial reaction (panic
+          selling, sector boycott, localized property-value drop) for a community or
+          industry segment.
+  81-100  Severe. Could plausibly trigger large-scale economic harm (market-wide
+          panic, city-wide devaluation, mass business closures, capital flight).
+
+policy_disruption - how much the claim undermines a specific active policy rollout. \
+Score this conservatively and narrowly - only the claim's effect on policy execution, \
+NOT general criticism or disagreement with the policy itself. Ordinary criticism is not \
+automatically high on this dimension; a government tool must not treat disagreement \
+with its own policy as "harm":
+  0-20    No policy implication. Unrelated to any active/upcoming government policy.
+  21-40   Minimal. References a policy topic in passing, doesn't question or oppose
+          a specific active policy.
+  41-60   Moderate. Expresses disagreement/skepticism toward a specific active
+          policy, but framed as opinion/debate rather than a false factual assertion.
+  61-80   High. Makes a specific false factual assertion about an active policy's
+          mechanics, timeline, or effects, likely to create confusion that could
+          measurably slow or complicate implementation.
+  81-100  Severe. Makes a specific false assertion likely to cause direct,
+          large-scale non-compliance, organized resistance, or abandonment of a
+          policy before it can be evaluated on its merits.
 """
 
 DEBUNK_CONTENT_SYSTEM_PROMPT = """\
