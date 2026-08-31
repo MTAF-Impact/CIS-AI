@@ -23,10 +23,16 @@ def determine_confidence_band(
     breadth: int,
     run_truncated: bool = False,
     unavailable_signal_count: int = 0,
+    high_score_min: float = HIGH_SCORE_MIN,
+    high_breadth_min: int = HIGH_BREADTH_MIN,
+    medium_score_min: float = MEDIUM_SCORE_MIN,
+    medium_breadth_min: int = MEDIUM_BREADTH_MIN,
 ) -> ConfidenceBand:
-    if coordination_score >= HIGH_SCORE_MIN and breadth >= HIGH_BREADTH_MIN:
+    """The four cutoffs are backend-configurable now (CISDetectorSettings'
+    high/medium score+breadth cutoffs) - module constants remain the defaults."""
+    if coordination_score >= high_score_min and breadth >= high_breadth_min:
         band = ConfidenceBand.HIGH
-    elif coordination_score >= MEDIUM_SCORE_MIN and breadth >= MEDIUM_BREADTH_MIN:
+    elif coordination_score >= medium_score_min and breadth >= medium_breadth_min:
         band = ConfidenceBand.MEDIUM
     else:
         band = ConfidenceBand.LOW

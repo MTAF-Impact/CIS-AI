@@ -56,11 +56,14 @@ def fuse_and_prune(
     signals: dict[SignalName, PairScores | None],
     weights: dict[SignalName, float] | None = None,
     theta_edge: float = DEFAULT_THETA_EDGE,
+    min_signal_families: int = MIN_SIGNAL_FAMILIES_PER_EDGE,
 ) -> tuple[list[FusedEdge], list[SignalName]]:
     """signals maps each family name to its pairwise score dict, or None if that
     family was entirely unavailable this run (e.g. w_struct with no follower data).
     Returns (retained edges, unavailable family names) - the caller records the
-    latter on detection_run.signals_unavailable."""
+    latter on detection_run.signals_unavailable. min_signal_families is
+    backend-configurable (CISDetectorSettings.MinSignalFamilies) - the PRD's range
+    starts at 2, one is never permissible."""
     base_weights = weights or DEFAULT_WEIGHTS
     effective_weights, unavailable = _effective_weights(signals, base_weights)
 
@@ -83,7 +86,7 @@ def fuse_and_prune(
         strong_families = sum(
             1 for v in per_signal.values() if v >= MULTI_SIGNAL_CONTRIBUTION_THRESHOLD
         )
-        if strong_families < MIN_SIGNAL_FAMILIES_PER_EDGE:
+        if strong_families < min_signal_families:
             continue
 
         edges.append(

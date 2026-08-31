@@ -1,31 +1,33 @@
-"""PRD 10.5.8 - Stage 7: execution model. run_detection_for_claim is the single
-pipeline entrypoint threading Stages 0-6 together and persisting the result, following
-the same session_factory/BackgroundTasks shape as policy_matchmaking_service.py (F2's
-async pipeline). trigger_detection_run is the dispatcher behind the AI service's one
-remaining F5 endpoint (POST /coordination/detection-runs) - see networks.py.
-
-Detection parameters (PRD 10.11) are static defaults from app.core.config.settings,
-optionally overridden per-run via the request body - CoordinationSettings (the old
-DB-backed F4 config) moved to the backend along with the rest of F5 config ownership.
+"""PRD 10.5.8 - Stage 7: execution model. The backend's actual reference contract
+(CIS-Backend internal/aiclient/detection.go, docs/AI-INTEGRATION.md Flow 7/8, pulled
+and reviewed this session) drives every shape here, not PRD 10.5.8 read in isolation:
+`create_pending_run`/`run_detection` are the two halves of POST /api/v1/detection/runs
+(create synchronously so `run_id` is real before the 202 response, then run in the
+background); `claim_ids` is always a list - one for a claim-scoped run, many for a
+topic-batch run, both in one `detection_run` row. The backend computes window_start/
+window_end and sends the full detector parameter set on every call - there is no
+DB-backed config or partial-override concept on this side any more.
 
 Known data-availability gaps, all documented rather than faked: ContentItem carries
 no reshare/quote/reply/outbound-link fields yet, so w_amp is effectively empty until
-ingestion captures them; no ingestion path populates account creation
-date/profile-hash/bio yet, so w_meta and the PR metric run on handle/timing data only;
-no follower-graph source exists, so w_struct is always unavailable. Every signal
-function already treats "unavailable" as *unavailable*, not zero - this pipeline
-inherits that honesty rather than working around it."""
+ingestion captures them; no ingestion path populates account bio/declared_location/
+client_app yet, so w_meta and the PR metric run on a subset of their stated inputs;
+no follower-graph source exists, so w_struct is always unavailable; content_items has
+no separate posted_at (publish time) field yet, so `network_evidence_post.posted_at`
+is backfilled from ContentItem.created_at (ingest time) as an interim stand-in - see
+docs/COORDINATION.md. Every signal function already treats "unavailable" as
+*unavailable*, not zero - this pipeline inherits that honesty rather than working
+around it."""
 
+import hashlib
 import logging
 import uuid
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.config import settings
 from app.core.database import get_session_factory
 from app.models.claim import Claim
 from app.models.content import ContentItem
@@ -33,6 +35,7 @@ from app.models.coordination import (
     Account,
     CoordinatedNetwork,
     DetectionRun,
+    EvidenceSnapshot,
     NetworkAccount,
     NetworkBurstBin,
     NetworkClaimLink,
@@ -40,34 +43,25 @@ from app.models.coordination import (
     NetworkEvidencePost,
     OfftopicCluster,
 )
-from app.models.enums import ClaimStatus, ClaimType, DetectionRunStatus, Stance
-from app.schemas.coordination_network import DetectionRunOverrides
-from app.services.coordination import governance
+from app.models.enums import ClaimType, DetectionRunStatus, Stance
+from app.schemas.coordination_network import (
+    DetectionRunRequest,
+    DetectorParameters,
+    Exclusions,
+)
 from app.services.coordination.cluster_metrics import (
     ClusterMetrics,
     compute_cluster_metrics,
 )
 from app.services.coordination.clustering import DetectedCommunity, detect_communities
 from app.services.coordination.confidence import (
-    ALLOWLIST_MAJORITY_THRESHOLD,
-    HIGH_BREADTH_MIN,
-    HIGH_SCORE_MIN,
-    MEDIUM_BREADTH_MIN,
-    MEDIUM_SCORE_MIN,
     compute_signal_breadth,
     determine_confidence_band,
     is_allowlist_suppressed,
 )
 from app.services.coordination.evidence import build_evidence_snapshot
-from app.services.coordination.fusion import (
-    DEFAULT_WEIGHTS,
-    MIN_SIGNAL_FAMILIES_PER_EDGE,
-    MULTI_SIGNAL_CONTRIBUTION_THRESHOLD,
-    FusedEdge,
-    fuse_and_prune,
-)
+from app.services.coordination.fusion import FusedEdge, fuse_and_prune
 from app.services.coordination.recurrence import (
-    DEFAULT_RECURRENCE_THRESHOLD,
     RecurrenceCandidate,
     compute_fingerprint,
     find_recurrence_parent,
@@ -87,82 +81,51 @@ from app.services.multilingual_embedding_service import (
 
 logger = logging.getLogger(__name__)
 
-MIN_CANDIDATES_TO_RUN = 2  # below this, no cluster (N_min=5 by default) could ever form
+MIN_CANDIDATES_TO_RUN = 2  # below this, no cluster (min_cluster_size=5 by default) could ever form
 DEFAULT_RANDOM_SEED = 42
 MODEL_VERSIONS = {"leidenalg": "0.12", "igraph": "1.0"}  # recorded for reproducibility, 10.5.6 pt 7
+DEFAULT_RETENTION_MONTHS = 24  # initial evidence_snapshot.expires_at; actual purging is backend-driven
+COMPARISON_ACCOUNT_CAP_MULTIPLIER = 1  # comparison set capped to ~network size, see _select_comparison_accounts
 STOP_WORDS = frozenset(
     {"the", "a", "an", "is", "are", "was", "were", "this", "that", "it", "in", "on", "for", "of", "to", "and", "with"}
 )
 
 
-@dataclass(frozen=True)
-class DetectionParams:
-    """The PRD 10.11 tunables, defaulted from static config and optionally overridden
-    per-run (see trigger_detection_run's `overrides` parameter)."""
-
-    window_hours: float = settings.COORDINATION_DEFAULT_WINDOW_HOURS
-    a_max: int = settings.COORDINATION_A_MAX
-    theta_edge: float = settings.COORDINATION_THETA_EDGE
-    k_core: int = settings.COORDINATION_K_CORE
-    leiden_resolution: float = settings.COORDINATION_LEIDEN_RESOLUTION
-    n_min: int = settings.COORDINATION_N_MIN
-    rho_min: float = settings.COORDINATION_RHO_MIN
-    mu_anchor: float = settings.COORDINATION_MU_ANCHOR
-    p_min: int = settings.COORDINATION_P_MIN
-    omega_min: float = settings.COORDINATION_OMEGA_MIN
-    bin_width_seconds: int = settings.COORDINATION_BIN_WIDTH_SECONDS
-    null_model_alpha: float = settings.COORDINATION_NULL_MODEL_ALPHA
-    tau_dup: float = settings.COORDINATION_TAU_DUP
-    tau_sem: float = settings.COORDINATION_TAU_SEM
-    l_min: int = settings.COORDINATION_L_MIN
-    provenance_half_life_hours: float = settings.COORDINATION_PROVENANCE_HALF_LIFE_HOURS
-    self_exclusion_handles: list[str] = field(
-        default_factory=lambda: list(settings.COORDINATION_SELF_EXCLUSION_HANDLES)
-    )
+def _library_version_string() -> str:
+    return ",".join(f"{name}=={version}" for name, version in MODEL_VERSIONS.items())
 
 
-def _effective_params(overrides: DetectionRunOverrides | None) -> DetectionParams:
-    if overrides is None:
-        return DetectionParams()
-    supplied = overrides.model_dump(exclude_none=True)
-    valid_fields = {f.name for f in fields(DetectionParams)}
-    return DetectionParams(**{k: v for k, v in supplied.items() if k in valid_fields})
-
-
-def _run_parameters(window_hours: float, params: DetectionParams) -> dict:
+def _run_parameters(params: DetectorParameters) -> dict:
     """Every parameter actually in force for this run, per PRD 10.5.6 point 7 - "a
     report generated months later can state the exact configuration that produced
-    it." A handful of values without a per-run override yet (confidence-band cutoffs,
-    the allowlist-majority threshold, the multi-signal-rule constants) still read
-    their compile-time module defaults."""
-    return {
-        "window_hours": window_hours,
-        "a_max": params.a_max,
-        "signal_weights": DEFAULT_WEIGHTS,
-        "theta_edge": params.theta_edge,
-        "min_signal_families_per_edge": MIN_SIGNAL_FAMILIES_PER_EDGE,
-        "multi_signal_contribution_threshold": MULTI_SIGNAL_CONTRIBUTION_THRESHOLD,
-        "k_core": params.k_core,
-        "leiden_resolution": params.leiden_resolution,
-        "n_min": params.n_min,
-        "rho_min": params.rho_min,
-        "mu_anchor": params.mu_anchor,
-        "p_min": params.p_min,
-        "omega_min": params.omega_min,
-        "bin_width_seconds": params.bin_width_seconds,
-        "null_model_alpha": params.null_model_alpha,
-        "tau_dup": params.tau_dup,
-        "tau_sem": params.tau_sem,
-        "l_min": params.l_min,
-        "provenance_half_life_hours": params.provenance_half_life_hours,
-        "self_exclusion_handles": params.self_exclusion_handles,
-        "high_confidence_score_min": HIGH_SCORE_MIN,
-        "high_confidence_breadth_min": HIGH_BREADTH_MIN,
-        "medium_confidence_score_min": MEDIUM_SCORE_MIN,
-        "medium_confidence_breadth_min": MEDIUM_BREADTH_MIN,
-        "allowlist_majority_threshold": ALLOWLIST_MAJORITY_THRESHOLD,
-        "recurrence_match_threshold": DEFAULT_RECURRENCE_THRESHOLD,
-    }
+    it." Persisted verbatim, matching the backend's expectation that
+    detection_run.parameters_json holds exactly what it sent."""
+    return params.model_dump()
+
+
+# --- Run creation (synchronous half of POST /api/v1/detection/runs) ----------------
+
+
+async def create_pending_run(db: AsyncSession, payload: DetectionRunRequest) -> DetectionRun:
+    """Writes the detection_run row synchronously, before the 202 response, so
+    run_id is real and immediately queryable - the backend never polls, it reads
+    this row directly."""
+    run = DetectionRun(
+        scope_claim_ids=[str(c) for c in payload.claim_ids],
+        trigger_source=payload.trigger_source,
+        window_start=payload.window_start,
+        window_end=payload.window_end,
+        parameters=_run_parameters(payload.parameters),
+        model_versions=MODEL_VERSIONS,
+        library_version=_library_version_string(),
+        random_seed=DEFAULT_RANDOM_SEED,
+        candidates_count=0,
+        status=DetectionRunStatus.PENDING,
+    )
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+    return run
 
 
 # --- Stage 0/1 inputs --------------------------------------------------------------
@@ -215,28 +178,13 @@ async def _total_post_counts(
     return dict(rows)
 
 
-async def _load_allowlisted_handles(db: AsyncSession) -> set[str]:
-    """Reads the backend-owned `cis_coordination_allowlist` table - the integration
-    doc's one explicit exception to "no shared-table access" (read-only, only this
-    table). ASSUMPTION pending backend confirmation: the doc names the table but not
-    its schema, so the column names below (handle, removed_at) are carried over from
-    this service's own now-removed CoordinationAllowlist model as the closest known
-    shape - reconcile against the backend's actual DDL before this reads real data."""
-    rows = (
-        await db.execute(
-            text("SELECT handle FROM cis_coordination_allowlist WHERE removed_at IS NULL")
-        )
-    ).scalars().all()
-    return set(rows)
-
-
 async def _get_or_create_accounts(
     db: AsyncSession, platform_account_ids: set[str], platform: str = "unknown"
 ) -> dict[str, uuid.UUID]:
-    """Get-or-create coordination_accounts rows keyed by (platform,
-    platform_account_id). No unique DB constraint on that pair yet (Phase 0 didn't
-    add one) - fine for the sequential/scheduled runs this pipeline supports today; a
-    future migration should add one before concurrent runs become a real concern."""
+    """Get-or-create account rows keyed by (platform, platform_account_id) - the
+    table now has a real UNIQUE constraint on that pair (matching the backend's
+    reference schema), so this is also where a concurrent-insert race would surface;
+    fine for the sequential runs this pipeline supports today."""
     if not platform_account_ids:
         return {}
     existing = (
@@ -258,9 +206,9 @@ async def _get_or_create_accounts(
 async def _load_recurrence_candidates(db: AsyncSession) -> list[RecurrenceCandidate]:
     rows = (
         await db.execute(
-            select(NetworkAccount.network_id, Account.platform_account_id).join(
-                Account, Account.id == NetworkAccount.account_id
-            )
+            select(NetworkAccount.network_id, Account.platform_account_id)
+            .join(Account, Account.id == NetworkAccount.account_id)
+            .where(NetworkAccount.membership_role == "member")
         )
     ).all()
     by_network: dict[uuid.UUID, set[str]] = defaultdict(set)
@@ -281,18 +229,40 @@ def _extract_top_terms(posts: list[SignalPost], limit: int = 5) -> list[str]:
     return [w for w, _ in counts.most_common(limit)]
 
 
+def _select_comparison_accounts(
+    all_candidate_ids: list[str],
+    clustered_ids: set[str],
+    community_size: int,
+    total_posts_by_account: dict[str, int],
+) -> list[str]:
+    """BEYOND 10.10 (backend gap 7) - US51's "genuine unclustered accounts active on
+    the same claim, for contrast". Ranked by post volume (same tie-break convention
+    as the A_max scale control) for determinism, capped to roughly the network's own
+    size so the comparison set doesn't dwarf the network it's contrasting."""
+    unclustered = [a for a in all_candidate_ids if a not in clustered_ids]
+    ranked = sorted(unclustered, key=lambda a: total_posts_by_account.get(a, 0), reverse=True)
+    cap = max(community_size * COMPARISON_ACCOUNT_CAP_MULTIPLIER, 1)
+    return ranked[:cap]
+
+
 def _build_signals(
     posts: list[SignalPost],
     accounts: list[SignalAccount],
     embedder: MultilingualEmbeddingService,
-    params: DetectionParams,
+    params: DetectorParameters,
+    common_phrase_allowlist: set[str],
 ) -> dict[str, dict[tuple[str, str], float] | None]:
     return {
         "w_time": compute_temporal_synchrony(
             posts, bin_width_seconds=params.bin_width_seconds, alpha=params.null_model_alpha
         ),
         "w_text": compute_content_duplication(
-            posts, tau_dup=params.tau_dup, tau_sem=params.tau_sem, l_min=params.l_min, embedder=embedder
+            posts,
+            common_phrase_allowlist=common_phrase_allowlist,
+            tau_dup=params.dup_threshold,
+            tau_sem=params.sem_threshold,
+            l_min=params.min_post_length,
+            embedder=embedder,
         ),
         "w_amp": compute_co_amplification(posts),
         "w_meta": compute_provenance_similarity(accounts, half_life_hours=params.provenance_half_life_hours),
@@ -317,7 +287,7 @@ async def _persist_offtopic_cluster(
 ) -> None:
     """PRD 10.5.1a point 7 - a real coordinated cluster that isn't about this claim.
     Suppressed from the network list, retained only for aggregate recalibration
-    review (now the backend's - it reads this table directly)."""
+    review (the backend's - it reads this table directly)."""
     db.add(
         OfftopicCluster(
             run_id=run_id,
@@ -358,8 +328,15 @@ async def _persist_network(
     relevance_post_count: int,
     account_id_map: dict[str, uuid.UUID],
     embedder: MultilingualEmbeddingService,
+    allowlist_suppressed: bool,
+    comparison_account_ids: list[str],
+    total_posts_by_account: dict[str, int],
+    common_phrase_allowlist: set[str],
 ) -> CoordinatedNetwork:
-    snapshot = build_evidence_snapshot(community, cluster_posts, accounts, edges, embedder=embedder)
+    snapshot = build_evidence_snapshot(
+        community, cluster_posts, accounts, edges, embedder=embedder,
+        common_phrase_allowlist=common_phrase_allowlist,
+    )
     platforms = sorted({p.source for p in cluster_posts if p.source})
 
     network = CoordinatedNetwork(
@@ -372,23 +349,27 @@ async def _persist_network(
         au=metrics.au,
         signal_breadth=breadth,
         confidence_band=band,
+        raw_counts=metrics.raw_counts,
         account_count=len(community.account_ids),
         post_count=len(cluster_posts),
         platforms=platforms,
         internal_density=community.internal_density,
         conductance=community.conductance,
-        graph_layout={account_id: list(xy) for account_id, xy in snapshot.graph.layout.items()},
+        comparison_account_count=len(comparison_account_ids),
         fingerprint_hash=fingerprint,
         parent_network_id=parent_network_id,
+        allowlist_suppressed=allowlist_suppressed,
     )
     db.add(network)
     await db.flush()
 
     for entry in snapshot.account_annex:
+        xy = snapshot.graph.layout.get(entry.account_id)
         db.add(
             NetworkAccount(
                 network_id=network.id,
                 account_id=account_id_map[entry.account_id],
+                membership_role="member",
                 posts_in_cluster=entry.posts_in_cluster,
                 duplication_rate=entry.duplication_rate,
                 median_interpost_interval_seconds=entry.median_interpost_interval_seconds,
@@ -398,20 +379,37 @@ async def _persist_network(
                 # Per-metric contribution breakdown (not just aggregate stats) is a
                 # future refinement - left empty rather than faked.
                 score_contribution={},
+                layout_x=xy[0] if xy else None,
+                layout_y=xy[1] if xy else None,
+            )
+        )
+    comparison_id_map = await _get_or_create_accounts(db, set(comparison_account_ids))
+    for account_id in comparison_account_ids:
+        db.add(
+            NetworkAccount(
+                network_id=network.id,
+                account_id=comparison_id_map[account_id],
+                membership_role="comparison",
+                posts_in_cluster=total_posts_by_account.get(account_id, 0),
+                duplication_rate=0.0,
+                circadian_coverage=0.0,
+                degree_centrality=0.0,
+                eigenvector_centrality=0.0,
+                score_contribution={},
             )
         )
     for edge in snapshot.graph.edges:
         db.add(
             NetworkEdge(
                 network_id=network.id,
-                account_a_id=account_id_map[edge.account_a],
-                account_b_id=account_id_map[edge.account_b],
+                account_a=account_id_map[edge.account_a],
+                account_b=account_id_map[edge.account_b],
                 w_total=edge.w_total,
-                w_time=edge.per_signal.get("w_time"),
-                w_text=edge.per_signal.get("w_text"),
-                w_amp=edge.per_signal.get("w_amp"),
-                w_meta=edge.per_signal.get("w_meta"),
-                w_struct=edge.per_signal.get("w_struct"),
+                w_time=edge.per_signal.get("w_time", 0.0),
+                w_text=edge.per_signal.get("w_text", 0.0),
+                w_amp=edge.per_signal.get("w_amp", 0.0),
+                w_meta=edge.per_signal.get("w_meta", 0.0),
+                w_struct=edge.per_signal.get("w_struct", 0.0),
                 signal_count=len(edge.per_signal),
             )
         )
@@ -422,6 +420,7 @@ async def _persist_network(
                 account_id=account_id_map[post.account_id],
                 post_platform_id=post.post_id,
                 captured_text=post.captured_text,
+                # Interim stand-in for real publish time - see module docstring.
                 posted_at=post.posted_at,
                 content_sha256=post.content_sha256,
                 duplicate_group_id=post.duplicate_group_id,
@@ -446,208 +445,171 @@ async def _persist_network(
             overlap_ratio=relevance_overlap_ratio,
             anchoring_share=relevance_anchoring_share,
             claim_cluster_post_count=relevance_post_count,
-            is_primary_claim=True,  # single-claim run - see module docstring
+            is_primary_claim=True,  # single-claim link per network - see module docstring
             passed_relevance_gate=True,
+        )
+    )
+
+    snapshot_digest = hashlib.sha256(
+        "|".join(sorted(p.content_sha256 for p in snapshot.representative_content)).encode("utf-8")
+    ).hexdigest()
+    created_at = datetime.now(UTC)
+    db.add(
+        EvidenceSnapshot(
+            network_id=network.id,
+            run_id=run_id,
+            snapshot_sha256=snapshot_digest,
+            evidence_post_count=len(snapshot.representative_content),
+            expires_at=created_at + timedelta(days=DEFAULT_RETENTION_MONTHS * 30),
         )
     )
     return network
 
 
-# --- Top-level entrypoint -----------------------------------------------------------
+# --- Top-level entrypoint: the background half of POST /api/v1/detection/runs ------
 
 
-async def run_detection_for_claim(
-    claim_id: uuid.UUID,
-    window_hours: float | None = None,
-    embedder: MultilingualEmbeddingService | None = None,
-    session_factory: async_sessionmaker | None = None,
-    params: DetectionParams | None = None,
-) -> uuid.UUID | None:
-    """Runs the full Stage 0-6 pipeline for one claim and persists the result.
-    Returns the created detection_run id, or None if the claim doesn't exist or isn't
-    an Existing claim. Safe to call repeatedly - each call is one fresh run, not
-    idempotent by design (recurrence tracking is how repeat detections get linked,
-    not deduplication)."""
-    embedder = embedder or get_multilingual_embedding_service()
-    session_factory = session_factory or get_session_factory()
-    params = params or DetectionParams()
-
-    async with session_factory() as db:
-        claim = await db.get(Claim, claim_id)
-        if claim is None or claim.claim_type != ClaimType.EXISTING:
-            logger.warning("Detection run skipped - claim %s not found or not Existing", claim_id)
-            return None
-
-        effective_window_hours = window_hours if window_hours is not None else params.window_hours
-
-        window_end = datetime.now(UTC)
-        window_start = window_end - timedelta(hours=effective_window_hours)
-
-        run = DetectionRun(
-            scope_claim_ids=[str(claim_id)],
-            window_start=window_start,
-            window_end=window_end,
-            parameters=_run_parameters(effective_window_hours, params),
-            model_versions=MODEL_VERSIONS,
-            random_seed=DEFAULT_RANDOM_SEED,
-            candidates_count=0,
-            status=DetectionRunStatus.RUNNING,
-        )
-        db.add(run)
-        await db.flush()
-
-        try:
-            posts = await _load_candidate_posts(db, claim_id, window_start, window_end)
-            allowlisted_handles = await _load_allowlisted_handles(db)
-            selection = select_candidates(
-                posts,
-                allowlisted_account_ids=allowlisted_handles,
-                self_exclusion_account_ids=set(params.self_exclusion_handles),
-                a_max=params.a_max,
-            )
-
-            if len(selection.account_ids) < MIN_CANDIDATES_TO_RUN:
-                run.status = DetectionRunStatus.COMPLETED
-                run.candidates_count = selection.candidates_count
-                run.truncated = selection.truncated
-                run.completed_at = datetime.now(UTC)
-                await db.commit()
-                return run.id
-
-            signal_accounts = [SignalAccount(account_id=a, handle=a) for a in selection.account_ids]
-            signals = _build_signals(selection.posts, signal_accounts, embedder, params)
-            edges, unavailable = fuse_and_prune(signals, theta_edge=params.theta_edge)
-            communities = detect_communities(
-                edges, selection.account_ids,
-                k_core=params.k_core, resolution=params.leiden_resolution,
-                n_min=params.n_min, rho_min=params.rho_min,
-                random_seed=DEFAULT_RANDOM_SEED,
-            )
-
-            total_posts_by_account = await _total_post_counts(
-                db, selection.account_ids, window_start, window_end
-            )
-            account_id_map = await _get_or_create_accounts(db, set(selection.account_ids))
-            recurrence_candidates = await _load_recurrence_candidates(db)
-
-            for community in communities:
-                member_set = set(community.account_ids)
-                cluster_posts = [p for p in selection.posts if p.account_id in member_set]
-                relevance = evaluate_claim_relevance(
-                    community.account_ids, selection.posts, total_posts_by_account,
-                    mu_anchor=params.mu_anchor, p_min=params.p_min, omega_min=params.omega_min,
-                )
-                fingerprint = compute_fingerprint(community.account_ids, _extract_top_terms(cluster_posts))
-                metrics = compute_cluster_metrics(
-                    community,
-                    cluster_posts,
-                    signal_accounts,
-                    signals["w_time"] or {},
-                    window_hours=effective_window_hours,
-                    now=window_end,
-                    embedder=embedder,
-                )
-
-                if not relevance.passed:
-                    await _persist_offtopic_cluster(
-                        db, run.id, claim_id, community, cluster_posts, metrics,
-                        relevance.overlap_ratio, relevance.anchoring_share, fingerprint,
-                        relevance.failed_test,
-                    )
-                    continue
-
-                if is_allowlist_suppressed(community.account_ids, allowlisted_handles):
-                    logger.info(
-                        "Network suppressed as allowlist hit (run %s, %d members)",
-                        run.id, len(community.account_ids),
-                    )
-                    continue
-
-                breadth = compute_signal_breadth(
-                    {"sy": metrics.sy, "du": metrics.du, "co": metrics.co, "pr": metrics.pr, "au": metrics.au}
-                )
-                band = determine_confidence_band(
-                    metrics.coordination_score, breadth,
-                    run_truncated=selection.truncated,
-                    unavailable_signal_count=len(unavailable),
-                )
-                parent_id = find_recurrence_parent(member_set, recurrence_candidates)
-
-                network = await _persist_network(
-                    db, run.id, claim_id, community, cluster_posts, signal_accounts, edges,
-                    metrics, breadth, band, fingerprint,
-                    uuid.UUID(parent_id) if parent_id else None,
-                    relevance.overlap_ratio, relevance.anchoring_share,
-                    relevance.claim_cluster_post_count, account_id_map, embedder,
-                )
-                recurrence_candidates.append(RecurrenceCandidate(str(network.id), member_set))
-
-            run.status = DetectionRunStatus.COMPLETED
-            run.candidates_count = selection.candidates_count
-            run.truncated = selection.truncated
-            run.signals_unavailable = unavailable
-            run.completed_at = datetime.now(UTC)
-            await db.commit()
-        except Exception:
-            logger.exception("Detection run %s failed for claim %s", run.id, claim_id)
-            run.status = DetectionRunStatus.FAILED
-            run.completed_at = datetime.now(UTC)
-            await db.commit()
-
-        return run.id
-
-
-# --- Sweep + the single external trigger dispatcher --------------------------------
-
-
-async def run_scheduled_sweep(
-    session_factory: async_sessionmaker | None = None,
-    embedder: MultilingualEmbeddingService | None = None,
-    params: DetectionParams | None = None,
-) -> list[uuid.UUID]:
-    """Runs detection across every claim with status Active, plus a housekeeping
-    evidence-retention purge (PRD 10.9.1 point 7) beforehand. Stateless and doesn't
-    track when it was last run; cadence is entirely the backend's decision now (it
-    calls POST /coordination/detection-runs with no claim_id on whatever schedule it
-    chooses - PRD 10.5.8 point 1)."""
-    session_factory = session_factory or get_session_factory()
-    embedder = embedder or get_multilingual_embedding_service()
-    params = params or DetectionParams()
-
-    async with session_factory() as db:
-        await governance.purge_expired_evidence(db)
-        claim_ids = (
-            await db.execute(
-                select(Claim.id).where(
-                    Claim.claim_type == ClaimType.EXISTING, Claim.status == ClaimStatus.ACTIVE
-                )
-            )
-        ).scalars().all()
-
-    run_ids: list[uuid.UUID] = []
-    for claim_id in claim_ids:
-        run_id = await run_detection_for_claim(
-            claim_id, embedder=embedder, session_factory=session_factory, params=params
-        )
-        if run_id is not None:
-            run_ids.append(run_id)
-    return run_ids
-
-
-async def trigger_detection_run(
-    claim_id: uuid.UUID | None,
-    overrides: DetectionRunOverrides | None,
+async def run_detection(
+    run_id: uuid.UUID,
+    claim_ids: list[uuid.UUID],
+    window_start: datetime,
+    window_end: datetime,
+    parameters: DetectorParameters,
+    exclusions: Exclusions,
     embedder: MultilingualEmbeddingService | None = None,
     session_factory: async_sessionmaker | None = None,
 ) -> None:
-    """The dispatcher behind POST /coordination/detection-runs (networks.py) - the
-    AI service's one remaining F5 endpoint. claim_id set -> single-claim run;
-    claim_id None -> full active-claims sweep. Runs as a background task, so nothing
-    is returned to the caller beyond the 202 already sent."""
-    params = _effective_params(overrides)
-    if claim_id is not None:
-        await run_detection_for_claim(
-            claim_id, embedder=embedder, session_factory=session_factory, params=params
-        )
-    else:
-        await run_scheduled_sweep(session_factory=session_factory, embedder=embedder, params=params)
+    """Runs the full Stage 0-6 pipeline over every claim in claim_ids against the
+    already-created `run_id` row (create_pending_run wrote it synchronously before
+    the 202 response). One run, one or many claims - PRD 10.5.1 point 6: signals and
+    cluster metrics remain computed per claim even in batch mode, so this loops
+    internally rather than pooling candidates across claims (pooling is an optional
+    efficiency optimisation the PRD explicitly does not require)."""
+    embedder = embedder or get_multilingual_embedding_service()
+    session_factory = session_factory or get_session_factory()
+
+    async with session_factory() as db:
+        run = await db.get(DetectionRun, run_id)
+        if run is None:
+            logger.error("Detection run %s vanished before it could start", run_id)
+            return
+        run.status = DetectionRunStatus.RUNNING
+        await db.commit()
+
+        allowlisted_handles = {a.handle for a in exclusions.accounts}
+        common_phrases = set(exclusions.phrases)
+
+        total_candidates = 0
+        any_truncated = False
+        unavailable_union: set[str] = set()
+
+        try:
+            for claim_id in claim_ids:
+                claim = await db.get(Claim, claim_id)
+                if claim is None or claim.claim_type != ClaimType.EXISTING:
+                    logger.warning(
+                        "Detection run %s: claim %s not found or not Existing, skipped", run_id, claim_id
+                    )
+                    continue
+
+                posts = await _load_candidate_posts(db, claim_id, window_start, window_end)
+                selection = select_candidates(
+                    posts,
+                    allowlisted_account_ids=allowlisted_handles,
+                    a_max=parameters.candidate_cap,
+                )
+                total_candidates += selection.candidates_count
+                any_truncated = any_truncated or selection.truncated
+
+                if len(selection.account_ids) < MIN_CANDIDATES_TO_RUN:
+                    continue
+
+                signal_accounts = [SignalAccount(account_id=a, handle=a) for a in selection.account_ids]
+                signals = _build_signals(selection.posts, signal_accounts, embedder, parameters, common_phrases)
+                edges, unavailable = fuse_and_prune(
+                    signals,
+                    theta_edge=parameters.edge_threshold,
+                    min_signal_families=parameters.min_signal_families,
+                )
+                unavailable_union.update(unavailable)
+                communities = detect_communities(
+                    edges, selection.account_ids,
+                    k_core=parameters.k_core, resolution=parameters.leiden_resolution,
+                    n_min=parameters.min_cluster_size, rho_min=parameters.min_internal_density,
+                    random_seed=DEFAULT_RANDOM_SEED,
+                )
+                if not communities:
+                    continue
+
+                total_posts_by_account = await _total_post_counts(
+                    db, selection.account_ids, window_start, window_end
+                )
+                account_id_map = await _get_or_create_accounts(db, set(selection.account_ids))
+                recurrence_candidates = await _load_recurrence_candidates(db)
+                clustered_ids: set[str] = {a for c in communities for a in c.account_ids}
+
+                for community in communities:
+                    member_set = set(community.account_ids)
+                    cluster_posts = [p for p in selection.posts if p.account_id in member_set]
+                    relevance = evaluate_claim_relevance(
+                        community.account_ids, selection.posts, total_posts_by_account,
+                        mu_anchor=parameters.anchor_share, p_min=parameters.min_claim_posts,
+                        omega_min=parameters.min_link_strength,
+                    )
+                    fingerprint = compute_fingerprint(community.account_ids, _extract_top_terms(cluster_posts))
+                    metrics = compute_cluster_metrics(
+                        community, cluster_posts, signal_accounts,
+                        signals["w_time"] or {},
+                        window_hours=(window_end - window_start).total_seconds() / 3600,
+                        now=window_end, embedder=embedder,
+                        common_phrase_allowlist=common_phrases,
+                    )
+
+                    if not relevance.passed:
+                        await _persist_offtopic_cluster(
+                            db, run_id, claim_id, community, cluster_posts, metrics,
+                            relevance.overlap_ratio, relevance.anchoring_share, fingerprint,
+                            relevance.failed_test,
+                        )
+                        continue
+
+                    allowlist_suppressed = is_allowlist_suppressed(community.account_ids, allowlisted_handles)
+                    breadth = compute_signal_breadth(
+                        {"sy": metrics.sy, "du": metrics.du, "co": metrics.co, "pr": metrics.pr, "au": metrics.au}
+                    )
+                    band = determine_confidence_band(
+                        metrics.coordination_score, breadth,
+                        run_truncated=selection.truncated,
+                        unavailable_signal_count=len(unavailable),
+                        high_score_min=parameters.high_score_cutoff,
+                        high_breadth_min=parameters.high_breadth_cutoff,
+                        medium_score_min=parameters.medium_score_cutoff,
+                        medium_breadth_min=parameters.medium_breadth_cutoff,
+                    )
+                    parent_id = find_recurrence_parent(member_set, recurrence_candidates)
+                    comparison_ids = _select_comparison_accounts(
+                        selection.account_ids, clustered_ids, len(community.account_ids), total_posts_by_account
+                    )
+
+                    network = await _persist_network(
+                        db, run_id, claim_id, community, cluster_posts, signal_accounts, edges,
+                        metrics, breadth, band, fingerprint,
+                        uuid.UUID(parent_id) if parent_id else None,
+                        relevance.overlap_ratio, relevance.anchoring_share,
+                        relevance.claim_cluster_post_count, account_id_map, embedder,
+                        allowlist_suppressed, comparison_ids, total_posts_by_account, common_phrases,
+                    )
+                    recurrence_candidates.append(RecurrenceCandidate(str(network.id), member_set))
+
+            run.status = DetectionRunStatus.COMPLETED
+            run.candidates_count = total_candidates
+            run.truncated = any_truncated
+            run.signals_unavailable = sorted(unavailable_union)
+            run.completed_at = datetime.now(UTC)
+            await db.commit()
+        except Exception as exc:
+            logger.exception("Detection run %s failed", run_id)
+            run.status = DetectionRunStatus.FAILED
+            run.error = str(exc)[:2000]
+            run.completed_at = datetime.now(UTC)
+            await db.commit()

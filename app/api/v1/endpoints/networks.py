@@ -1,53 +1,81 @@
 """F5 (PRD Section 10) - Coordinated-Network Detector API surface.
 
-Per the backend integration doc's ownership split, the AI service exposes exactly one
-F5 endpoint: a run-trigger. Network list/detail, review, account annex, allowlist,
-CSV export, PDF/ZIP reports, and F4 config all moved to the backend, which reads the
-AI's 9 pipeline-output tables directly (same pattern already used for claims/policies/
-etc). See docs/COORDINATION.md.
+Two endpoints, matching the backend's actual reference contract verbatim
+(CIS-Backend internal/aiclient/endpoints.go pathDetectionRun/pathDetectionPurge,
+pulled and reviewed this session) - not the earlier guessed single-endpoint design.
+Everything else (network list/detail, review, account annex, allowlist, CSV export,
+PDF/ZIP reports, F4 config) lives on the backend, which reads the AI's tables
+directly. See docs/COORDINATION.md.
 """
 
 from fastapi import APIRouter, BackgroundTasks, Depends
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.database import get_session_factory
+from app.core.database import get_db, get_session_factory
 from app.core.security import verify_backend_api_key
+from app.models.enums import DetectionRunStatus
 from app.schemas.coordination_network import (
-    DetectionRunTriggerRequest,
-    DetectionRunTriggerResponse,
+    DetectionRunRequest,
+    DetectionRunResponse,
+    PurgeSnapshotsRequest,
+    PurgeSnapshotsResponse,
 )
-from app.services.coordination.pipeline import trigger_detection_run
+from app.services.coordination import governance, pipeline
 from app.services.multilingual_embedding_service import (
     MultilingualEmbeddingService,
     get_multilingual_embedding_service,
 )
 
-coordination_router = APIRouter(prefix="/coordination", tags=["coordination"])
+router = APIRouter(prefix="/detection", tags=["detection"])
 
 
-@coordination_router.post(
-    "/detection-runs",
-    response_model=DetectionRunTriggerResponse,
+@router.post(
+    "/runs",
+    response_model=DetectionRunResponse,
     status_code=202,
     dependencies=[Depends(verify_backend_api_key)],
 )
-async def trigger_detection(
-    payload: DetectionRunTriggerRequest,
+async def trigger_detection_run(
+    payload: DetectionRunRequest,
     background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
     embedder: MultilingualEmbeddingService = Depends(get_multilingual_embedding_service),
     session_factory: async_sessionmaker = Depends(get_session_factory),
-) -> DetectionRunTriggerResponse:
-    """`claim_id` set -> single-claim run (covers what used to be the on-demand and
-    velocity-triggered calls). `claim_id` omitted -> full sweep across every Active
-    claim (covers the old scheduled trigger), plus a housekeeping evidence-retention
-    purge (PRD 10.9.1 point 7) run once at the start of the sweep. All three PRD
-    10.5.8 trigger modes are the backend's decision now - it decides *when* to call
-    this and with which shape; we just run the pipeline."""
+) -> DetectionRunResponse:
+    """PRD 10.5.8 - all three trigger modes (scheduled/velocity/on-demand) are the
+    backend's decision now; this just runs the pipeline when asked. The
+    detection_run row is created synchronously (status=pending) before the 202
+    response, so run_id is real and immediately queryable - the backend never
+    polls, it reads the row directly as the pipeline updates it in the
+    background."""
+    run = await pipeline.create_pending_run(db, payload)
     background_tasks.add_task(
-        trigger_detection_run,
-        claim_id=payload.claim_id,
-        overrides=payload.overrides,
+        pipeline.run_detection,
+        run_id=run.id,
+        claim_ids=payload.claim_ids,
+        window_start=payload.window_start,
+        window_end=payload.window_end,
+        parameters=payload.parameters,
+        exclusions=payload.exclusions,
         embedder=embedder,
         session_factory=session_factory,
     )
-    return DetectionRunTriggerResponse(claim_id=payload.claim_id, status="scheduled")
+    # db.refresh() reads status back as a plain str (String column, no native enum
+    # type) rather than the DetectionRunStatus instance it was created with.
+    status = run.status.value if isinstance(run.status, DetectionRunStatus) else run.status
+    return DetectionRunResponse(run_id=run.id, status=status)
+
+
+@router.post(
+    "/snapshots/purge",
+    response_model=PurgeSnapshotsResponse,
+    dependencies=[Depends(verify_backend_api_key)],
+)
+async def purge_snapshots(
+    payload: PurgeSnapshotsRequest, db: AsyncSession = Depends(get_db)
+) -> PurgeSnapshotsResponse:
+    """PRD 10.9.1 point 7 - the backend computes which networks are past retention
+    (only it can see whether a report was generated from a snapshot) and hands over
+    the list; deletion is ours since the rows are AI-owned."""
+    count = await governance.purge_expired_evidence(db, payload.network_ids)
+    return PurgeSnapshotsResponse(snapshots_purged=count)

@@ -517,19 +517,27 @@ full shape as `GET /claims/{id}` for an existing claim.
 
 ---
 
-## Coordination — F5 detection trigger
+## Detection — F5 pipeline trigger + purge
 
-### `POST /coordination/detection-runs`
+Two endpoints, matching the backend's actual reference contract verbatim
+(`CIS-Backend` `internal/aiclient/endpoints.go`) — see `docs/COORDINATION.md` for
+the full pipeline this triggers, the 10 tables it writes, and why everything else
+(network list/detail/review/allowlist/reports/config) lives on the backend.
 
-The AI service's entire F5 (Coordinated-Network Detector) API surface, per the
-backend integration doc's ownership split — see `docs/COORDINATION.md` for the full
-pipeline this triggers, the 9 tables it writes, and why everything else (network
-list/detail/review/allowlist/reports/config) moved to the backend.
+### `POST /api/v1/detection/runs`
 
-**Request body**: `{"claim_id": "<uuid> | null", "overrides": {...} | null}`.
-`claim_id` set → single-claim run; omitted/null → full sweep across every Active
-claim. Always returns `202 {"claim_id": ..., "status": "scheduled"}` (fire-and-forget
-`BackgroundTasks`, no synchronous validation of `claim_id`).
+**Request body**: `{"claim_ids": ["<uuid>", ...], "trigger_source": "scheduled |
+velocity | on_demand", "window_start": "<iso8601>", "window_end": "<iso8601>",
+"parameters": {...full detector config...}, "exclusions": {"accounts": [...],
+"phrases": [...]}}`. Always returns `202 {"run_id": "<uuid>", "status": "pending"}`
+(fire-and-forget `BackgroundTasks`; the `detection_run` row is written
+synchronously before the response, so `run_id` is immediately queryable).
+
+### `POST /api/v1/detection/snapshots/purge`
+
+**Request body**: `{"network_ids": ["<uuid>", ...]}` → `{"snapshots_purged": N}`.
+The backend computes which networks are past retention; this service just deletes
+the named evidence.
 
 ## Coordination — CIB check (legacy, unrelated to F5)
 

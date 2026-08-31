@@ -51,16 +51,6 @@ async def test_engine() -> AsyncGenerator[AsyncEngine, None]:
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
-        # Stand-in for the backend-owned cis_coordination_allowlist table - the one
-        # exception to "no shared-table access" (see pipeline.py's
-        # _load_allowlisted_handles). Column names are an assumption pending backend
-        # confirmation of the real DDL - see that function's docstring.
-        await conn.execute(
-            text(
-                "CREATE TABLE IF NOT EXISTS cis_coordination_allowlist "
-                "(handle TEXT NOT NULL, removed_at TIMESTAMPTZ)"
-            )
-        )
     yield engine
     await engine.dispose()
 
@@ -75,7 +65,6 @@ async def db_session(test_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, N
     async with test_engine.begin() as conn:
         for table in reversed(Base.metadata.sorted_tables):
             await conn.execute(table.delete())
-        await conn.execute(text("DELETE FROM cis_coordination_allowlist"))
 
 
 @pytest_asyncio.fixture

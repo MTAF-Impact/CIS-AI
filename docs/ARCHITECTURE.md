@@ -87,8 +87,8 @@ this pattern is what makes that guarantee hold for background work too.
 
 Background-task-scheduling endpoints today: `POST /ingest`, `POST /ingest/batch`
 (clustering), `POST /policies` (matchmaking), `POST /matchmaking/policies` (matchmaking,
-Go-triggered), `POST /coordination/detection-runs` (F5 detection, single-claim or
-full sweep — see `COORDINATION.md`).
+Go-triggered), `POST /api/v1/detection/runs` (F5 detection, single or multi-claim
+batch — see `COORDINATION.md`).
 
 ## Module map
 

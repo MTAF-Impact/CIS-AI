@@ -1,8 +1,8 @@
-"""PRD 10.9 governance safeguard still owned by the AI service after the backend
-ownership split: the minimum-necessary-retention purge (10.9.1 point 7). The standing
-disclaimer moved with the report/detail surfaces to the backend - nothing left here to
-test for it. Purging is age-based only now (no more "except reported" carve-out - see
-governance.py's docstring)."""
+"""PRD 10.9.1 point 7 - evidence-artifact purge, now driven entirely by a
+backend-supplied network_ids list (POST /api/v1/detection/snapshots/purge) rather
+than an age computation on this side - the backend alone can see whether a report
+was generated (cis_network_reports), which is what makes the "except reported"
+exception possible again, just computed on their side instead of ours."""
 
 from datetime import UTC, datetime, timedelta
 
@@ -11,10 +11,10 @@ from sqlalchemy import select
 
 from app.models.claim import Claim
 from app.models.content import ContentItem
-from app.models.coordination import CoordinatedNetwork, NetworkAccount
+from app.models.coordination import CoordinatedNetwork, EvidenceSnapshot, NetworkAccount
 from app.models.enums import ClaimType, ContentSource, Stance
 from app.models.topic import Topic
-from app.services.coordination.governance import purge_expired_evidence
+from tests.coordination_fixtures import detection_request
 
 pytestmark = pytest.mark.integration
 
@@ -59,9 +59,7 @@ async def _seed_and_detect(client, db_session) -> CoordinatedNetwork:
     THIS call, not every network in the DB."""
     claim = await _seed_claim(db_session)
     await _seed_coordinated_cluster(db_session, claim.id)
-    response = await client.post(
-        "/api/v1/coordination/detection-runs", json={"claim_id": str(claim.id)}
-    )
+    response = await client.post("/api/v1/detection/runs", json=detection_request([claim.id]))
     assert response.status_code == 202
     return (
         await db_session.execute(
@@ -70,16 +68,16 @@ async def _seed_and_detect(client, db_session) -> CoordinatedNetwork:
     ).scalar_one()
 
 
-class TestEvidenceRetentionPurge:
-    async def test_purges_old_network_evidence_only(self, client, db_session):
+class TestEvidenceSnapshotPurge:
+    async def test_purges_named_networks_only(self, client, db_session):
         old_network = await _seed_and_detect(client, db_session)
-        old_network.created_at = datetime.now(UTC) - timedelta(days=800)  # ~26 months
-        await db_session.commit()
-
         recent_network = await _seed_and_detect(client, db_session)
 
-        purged = await purge_expired_evidence(db_session, retention_months=24)
-        assert purged == 1
+        response = await client.post(
+            "/api/v1/detection/snapshots/purge", json={"network_ids": [str(old_network.id)]}
+        )
+        assert response.status_code == 200
+        assert response.json()["snapshots_purged"] == 1
 
         # The audit record itself survives - only the evidence artifacts decay.
         still_exists = await db_session.get(CoordinatedNetwork, old_network.id)
@@ -91,10 +89,27 @@ class TestEvidenceRetentionPurge:
             )
         ).scalars().all()
         assert old_accounts == []
+        old_snapshot = (
+            await db_session.execute(
+                select(EvidenceSnapshot).where(EvidenceSnapshot.network_id == old_network.id)
+            )
+        ).scalar_one_or_none()
+        assert old_snapshot is None
 
         recent_accounts = (
             await db_session.execute(
                 select(NetworkAccount).where(NetworkAccount.network_id == recent_network.id)
             )
         ).scalars().all()
-        assert len(recent_accounts) == 6
+        assert len(recent_accounts) >= 6  # 6 members, plus whatever comparison accounts landed
+        recent_snapshot = (
+            await db_session.execute(
+                select(EvidenceSnapshot).where(EvidenceSnapshot.network_id == recent_network.id)
+            )
+        ).scalar_one_or_none()
+        assert recent_snapshot is not None
+
+    async def test_empty_list_purges_nothing(self, client, db_session):
+        response = await client.post("/api/v1/detection/snapshots/purge", json={"network_ids": []})
+        assert response.status_code == 200
+        assert response.json()["snapshots_purged"] == 0

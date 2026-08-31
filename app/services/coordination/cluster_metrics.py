@@ -34,6 +34,14 @@ class ClusterMetrics:
     pr: float
     au: float
     coordination_score: float
+    # The raw integer observation behind each normalised score (US50: "43 of 47
+    # accounts posted within the same 6-minute window", not just the score) -
+    # backend's coordinated_network.raw_counts_json. Built from whichever
+    # intermediate numerator/denominator each sub-metric already computes; not every
+    # component reduces to a single clean count (AU averages four per-account
+    # sub-signals), so this is a representative count per metric, not an exhaustive
+    # breakdown.
+    raw_counts: dict
 
 
 # --- SY: synchrony ---------------------------------------------------------------
@@ -47,11 +55,13 @@ def _mean_within_cluster_w_time(
     return sum(values) / len(values) if values else 0.0
 
 
-def _burst_share(cluster_posts: list[SignalPost], bin_width_seconds: int = 60) -> float:
+def _burst_share(cluster_posts: list[SignalPost], bin_width_seconds: int = 60) -> tuple[float, int, int]:
     """Share of C's posts falling inside bins whose volume exceeds mean + 3*std of
-    C's own baseline (its own posting rhythm, not the candidate set's)."""
+    C's own baseline (its own posting rhythm, not the candidate set's). Returns
+    (share, posts_in_burst, total_posts) - the last two back SY's raw_counts entry."""
+    total = len(cluster_posts)
     if not cluster_posts:
-        return 0.0
+        return 0.0, 0, 0
     bin_counts: dict[int, int] = defaultdict(int)
     for p in cluster_posts:
         bin_counts[int(p.created_at.timestamp() // bin_width_seconds)] += 1
@@ -61,33 +71,40 @@ def _burst_share(cluster_posts: list[SignalPost], bin_width_seconds: int = 60) -
     threshold = mean + BURST_SIGMA_MULTIPLIER * math.sqrt(variance)
     anomalous_bins = {b for b, c in bin_counts.items() if c > threshold}
     if not anomalous_bins:
-        return 0.0
+        return 0.0, 0, total
     in_burst = sum(
         1
         for p in cluster_posts
         if int(p.created_at.timestamp() // bin_width_seconds) in anomalous_bins
     )
-    return in_burst / len(cluster_posts)
+    return in_burst / total, in_burst, total
 
 
 def _synchrony(
     member_ids: list[str], cluster_posts: list[SignalPost], w_time: dict[tuple[str, str], float]
-) -> float:
-    return 100 * (0.6 * _mean_within_cluster_w_time(member_ids, w_time) + 0.4 * _burst_share(cluster_posts))
+) -> tuple[float, int, int]:
+    burst_share, posts_in_burst, total_posts = _burst_share(cluster_posts)
+    score = 100 * (0.6 * _mean_within_cluster_w_time(member_ids, w_time) + 0.4 * burst_share)
+    return score, posts_in_burst, total_posts
 
 
 # --- DU: duplication ---------------------------------------------------------------
 
 
 def _duplication(
-    cluster_posts: list[SignalPost], embedder: MultilingualEmbeddingService | None
-) -> float:
+    cluster_posts: list[SignalPost],
+    embedder: MultilingualEmbeddingService | None,
+    common_phrase_allowlist: set[str] | None = None,
+) -> tuple[float, int, int]:
+    total = len(cluster_posts)
     if not cluster_posts:
-        return 0.0
+        return 0.0, 0, 0
     embedder = embedder or get_multilingual_embedding_service()
-    eligible, duplicate_pairs = find_duplicate_post_pairs(cluster_posts, embedder=embedder)
+    eligible, duplicate_pairs = find_duplicate_post_pairs(
+        cluster_posts, common_phrase_allowlist=common_phrase_allowlist, embedder=embedder
+    )
     duplicated_ids = {eligible[i].id for pair in duplicate_pairs for i in pair}
-    return 100 * (len(duplicated_ids) / len(cluster_posts))
+    return 100 * (len(duplicated_ids) / total), len(duplicated_ids), total
 
 
 # --- CO: cohesion (reuses clustering.py's own density/conductance) ----------------
@@ -102,7 +119,8 @@ def _cohesion(community: DetectedCommunity) -> float:
 
 def _tightest_window_share(
     creation_times: list[datetime], window_hours: float = TIGHTEST_WINDOW_HOURS
-) -> float:
+) -> tuple[float, int, int]:
+    """Returns (share, accounts_in_tightest_window, total_accounts_with_known_creation_date)."""
     times = sorted(creation_times)
     window_seconds = window_hours * 3600
     best, left = 1, 0
@@ -110,7 +128,7 @@ def _tightest_window_share(
         while (times[right] - times[left]).total_seconds() > window_seconds:
             left += 1
         best = max(best, right - left + 1)
-    return best / len(times)
+    return best / len(times), best, len(times)
 
 
 def _handle_template_share(accounts: list[SignalAccount]) -> float:
@@ -160,16 +178,20 @@ def _provenance_anomaly(
     accounts: list[SignalAccount],
     platform_age_baseline_hours: list[float] | None,
     now: datetime,
-) -> float:
+) -> tuple[float, int, int]:
     creation_times = [a.created_at_platform for a in accounts if a.created_at_platform is not None]
+    window_share, window_count, window_total = (
+        _tightest_window_share(creation_times) if len(creation_times) >= 2 else (None, 0, 0)
+    )
     components = [
-        _tightest_window_share(creation_times) if len(creation_times) >= 2 else None,
+        window_share,
         _handle_template_share(accounts) if accounts else None,
         _duplicate_profile_image_share(accounts) if accounts else None,
         _age_percentile_inverted(accounts, platform_age_baseline_hours, now),
     ]
     available = [c for c in components if c is not None]
-    return 100 * (sum(available) / len(available)) if available else 0.0
+    score = 100 * (sum(available) / len(available)) if available else 0.0
+    return score, window_count, window_total
 
 
 # --- AU: automation & behavioural anomaly ------------------------------------------
@@ -223,7 +245,11 @@ def _reshare_ratio(posts: list[SignalPost]) -> float:
 
 def _automation_anomaly(
     member_ids: list[str], cluster_posts: list[SignalPost], window_hours: float
-) -> float:
+) -> tuple[float, int, int]:
+    """Returns (score, cluster_active_hours, 24) - the cluster's combined circadian
+    coverage (union of hours any member posted in) as AU's representative raw count.
+    AU itself averages four per-account sub-signals, which doesn't reduce to one
+    clean count the way SY/DU/PR's numerator/denominator do."""
     posts_by_account: dict[str, list[SignalPost]] = defaultdict(list)
     for p in cluster_posts:
         posts_by_account[p.account_id].append(p)
@@ -242,7 +268,9 @@ def _automation_anomaly(
         if available:
             per_account_scores.append(sum(available) / len(available))
 
-    return 100 * (sum(per_account_scores) / len(per_account_scores)) if per_account_scores else 0.0
+    score = 100 * (sum(per_account_scores) / len(per_account_scores)) if per_account_scores else 0.0
+    cluster_active_hours = len({p.created_at.hour for p in cluster_posts})
+    return score, cluster_active_hours, 24
 
 
 # --- Composite -----------------------------------------------------------------------
@@ -257,12 +285,13 @@ def compute_cluster_metrics(
     now: datetime,
     platform_age_baseline_hours: list[float] | None = None,
     embedder: MultilingualEmbeddingService | None = None,
+    common_phrase_allowlist: set[str] | None = None,
 ) -> ClusterMetrics:
-    sy = _synchrony(community.account_ids, cluster_posts, w_time)
-    du = _duplication(cluster_posts, embedder)
+    sy, sy_count, sy_total = _synchrony(community.account_ids, cluster_posts, w_time)
+    du, du_count, du_total = _duplication(cluster_posts, embedder, common_phrase_allowlist)
     co = _cohesion(community)
-    pr = _provenance_anomaly(accounts, platform_age_baseline_hours, now)
-    au = _automation_anomaly(community.account_ids, cluster_posts, window_hours)
+    pr, pr_count, pr_total = _provenance_anomaly(accounts, platform_age_baseline_hours, now)
+    au, au_count, au_total = _automation_anomaly(community.account_ids, cluster_posts, window_hours)
 
     coordination_score = WEIGHT_SY * sy + WEIGHT_DU * du + WEIGHT_CO * co + WEIGHT_PR * pr + WEIGHT_AU * au
     return ClusterMetrics(
@@ -272,4 +301,10 @@ def compute_cluster_metrics(
         pr=round(pr, 2),
         au=round(au, 2),
         coordination_score=round(max(0.0, min(100.0, coordination_score)), 2),
+        raw_counts={
+            "sy": {"posts_in_burst": sy_count, "total_posts": sy_total},
+            "du": {"duplicated_posts": du_count, "total_posts": du_total},
+            "pr": {"accounts_in_tightest_window": pr_count, "total_accounts": pr_total},
+            "au": {"active_hours": au_count, "total_hours": au_total},
+        },
     )
