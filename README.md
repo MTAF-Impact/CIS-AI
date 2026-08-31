@@ -44,6 +44,13 @@ capability from the earlier design, ahead of F5's own future spec.
 > every claim<->policy correlation through. `POST /policies` (multipart upload) still works
 > for local testing/demos, just isn't what the backend calls.
 >
+> The webhook is idempotent per `policy_id` (`docs/api/internal.md` requires this - the
+> backend retries a failed callback up to 3x via a daily job, and an operator can trigger
+> `POST /policies/:id/rematch`). `Policy.backend_policy_id` persists the correlation
+> specifically so a repeat call with the same `policy_id` is detected and just re-reports
+> the existing result instead of creating a second `Policy` + duplicating the generated
+> Non-Existing claim.
+>
 > Both `AI_SERVICE_API_KEY` (inbound, checked by `app/core/security.py`) and
 > `INTERNAL_API_KEY` (outbound, sent as `X-Internal-Key`) are optional shared secrets -
 > unset by default, matching the current private-network-only deployment.

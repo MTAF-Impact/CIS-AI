@@ -18,7 +18,7 @@ from datetime import date
 
 import httpx
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.database import get_session_factory
@@ -179,16 +179,52 @@ async def run_matchmaking_webhook(
     """Flow 1 handler (see app.api.v1.endpoints.matchmaking) - creates our own Policy
     row for a backend-uploaded policy, runs the matchmaking pipeline, then always
     reports back via Flow 2 (app.services.backend_callback_service), success or
-    failure. `backend_policy_id` is the backend's cis_policies.id, never persisted on
-    our side - only our own Policy.id (returned as ai_policy_id) is the join key the
-    backend stores."""
+    failure. `backend_policy_id` (the backend's cis_policies.id) is persisted on our
+    own Policy.backend_policy_id specifically so a retry of the same policy_id (the
+    backend's own daily retry job, or an operator-triggered POST /policies/:id/rematch)
+    is detected and just re-reports the existing result instead of re-running the
+    pipeline - docs/api/internal.md requires this endpoint be idempotent per policy_id
+    and never duplicate the generated Non-Existing claim."""
     llm = llm or get_llm_client()
     embedder = embedder or get_embedding_service()
     session_factory = session_factory or get_session_factory()
 
-    extracted_text, file_data = await _fetch_and_extract(file_name, file_mime_type, document_url)
-
     async with session_factory() as db:
+        existing = (
+            await db.execute(select(Policy).where(Policy.backend_policy_id == backend_policy_id))
+        ).scalar_one_or_none()
+        if existing is not None:
+            logger.info(
+                "Matchmaking webhook retry for backend policy %s - re-reporting existing "
+                "result (ai_policy_id=%s) instead of re-running the pipeline",
+                backend_policy_id,
+                existing.id,
+            )
+            matched_count = (
+                await db.execute(
+                    select(func.count())
+                    .select_from(ClaimPolicy)
+                    .where(ClaimPolicy.policy_id == existing.id)
+                )
+            ).scalar_one()
+            generated_count = (
+                await db.execute(
+                    select(func.count())
+                    .select_from(Claim)
+                    .where(Claim.policy_id == existing.id, Claim.claim_type == ClaimType.NON_EXISTING)
+                )
+            ).scalar_one()
+            await backend_callback_service.report_matchmaking_result(
+                backend_policy_id=backend_policy_id,
+                ai_policy_id=existing.id,
+                status="completed",
+                matched_claim_count=matched_count,
+                generated_claim_count=generated_count,
+            )
+            return
+
+        extracted_text, file_data = await _fetch_and_extract(file_name, file_mime_type, document_url)
+
         policy = Policy(
             title=name,
             description=description,
@@ -197,6 +233,7 @@ async def run_matchmaking_webhook(
             file_name=file_name,
             file_content_type=file_mime_type,
             file_data=file_data,
+            backend_policy_id=backend_policy_id,
             processing=True,
         )
         db.add(policy)

@@ -51,6 +51,16 @@ class Policy(Base):
     file_content_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     file_data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
+    # Soft reference (no FK - it's the Go backend's cis_policies.id, a table we never
+    # touch) to the policy that triggered this row via the Flow 1 webhook. Null for
+    # policies created through our own POST /policies upload flow. Exists purely so
+    # run_matchmaking_webhook can detect a retry of the same backend policy_id and
+    # avoid duplicating the generated Non-Existing claim - see docs/api/internal.md's
+    # "Make the endpoint idempotent for a given policy_id" requirement.
+    backend_policy_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), unique=True, nullable=True
+    )
+
     # Rolled Out / Not Rolled Out (US41) is intentionally NOT a stored column - it's
     # derived from rolled_out_date vs. wall-clock time (see the `status` property below),
     # so it's always correct without needing a scheduled re-evaluation job.
