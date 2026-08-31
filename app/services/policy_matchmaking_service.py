@@ -149,7 +149,9 @@ async def _fetch_and_extract(
     if not document_url:
         return None, None
     try:
-        async with httpx.AsyncClient(timeout=DOCUMENT_FETCH_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(
+            timeout=DOCUMENT_FETCH_TIMEOUT_SECONDS, follow_redirects=True
+        ) as client:
             response = await client.get(document_url)
             response.raise_for_status()
             data = response.content
