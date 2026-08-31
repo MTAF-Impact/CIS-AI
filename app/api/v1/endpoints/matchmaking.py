@@ -12,6 +12,8 @@ from app.schemas.matchmaking import (
     PolicyMatchmakingAckResponse,
     PolicyMatchmakingWebhookRequest,
 )
+from app.services.embedding_service import EmbeddingService, get_embedding_service
+from app.services.llm_client import LLMClient, get_llm_client
 from app.services.policy_matchmaking_service import run_matchmaking_webhook
 
 router = APIRouter(prefix="/matchmaking", tags=["matchmaking"])
@@ -22,6 +24,8 @@ async def receive_policy_for_matchmaking(
     payload: PolicyMatchmakingWebhookRequest,
     background_tasks: BackgroundTasks,
     session_factory: async_sessionmaker = Depends(get_session_factory),
+    llm: LLMClient = Depends(get_llm_client),
+    embedder: EmbeddingService = Depends(get_embedding_service),
     _: None = Depends(verify_backend_api_key),
 ) -> PolicyMatchmakingAckResponse:
     background_tasks.add_task(
@@ -33,6 +37,8 @@ async def receive_policy_for_matchmaking(
         file_name=payload.file_name,
         file_mime_type=payload.file_mime_type,
         document_url=payload.document_url,
+        llm=llm,
+        embedder=embedder,
         session_factory=session_factory,
     )
     return PolicyMatchmakingAckResponse()

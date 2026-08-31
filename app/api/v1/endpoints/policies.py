@@ -22,6 +22,8 @@ from app.models.claim import Claim
 from app.models.policy import ClaimPolicy, Policy
 from app.schemas.policy import PolicyDetailRead, PolicyListResult, PolicyRead
 from app.services.document_extraction import UnsupportedDocumentTypeError, extract_text
+from app.services.embedding_service import EmbeddingService, get_embedding_service
+from app.services.llm_client import LLMClient, get_llm_client
 from app.services.policy_matchmaking_service import match_and_predict_claims_for_policy
 
 router = APIRouter(prefix="/policies", tags=["policies"])
@@ -85,6 +87,8 @@ async def create_policy(
     rolled_out_date: date = Form(...),
     db: AsyncSession = Depends(get_db),
     session_factory: async_sessionmaker = Depends(get_session_factory),
+    llm: LLMClient = Depends(get_llm_client),
+    embedder: EmbeddingService = Depends(get_embedding_service),
 ) -> Policy:
     """US40 - the only 3 fields the "Add Public Policy" modal collects. Immediately
     after commit, kicks off the AI matchmaking pipeline (US42) in the background - the
@@ -110,7 +114,11 @@ async def create_policy(
     await db.refresh(policy)
 
     background_tasks.add_task(
-        match_and_predict_claims_for_policy, policy.id, session_factory=session_factory
+        match_and_predict_claims_for_policy,
+        policy.id,
+        llm=llm,
+        embedder=embedder,
+        session_factory=session_factory,
     )
     return policy
 

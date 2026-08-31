@@ -58,7 +58,9 @@ async def ingest_content(
     db.add(item)
     await db.commit()
     await db.refresh(item)
-    background_tasks.add_task(cluster_unclustered_content_task, session_factory=session_factory)
+    background_tasks.add_task(
+        cluster_unclustered_content_task, llm=llm, embedder=embedder, session_factory=session_factory
+    )
     return item
 
 
@@ -100,7 +102,9 @@ async def ingest_content_batch(
         await db.commit()
         for item in created:
             await db.refresh(item)
-        background_tasks.add_task(cluster_unclustered_content_task, session_factory=session_factory)
+        background_tasks.add_task(
+        cluster_unclustered_content_task, llm=llm, embedder=embedder, session_factory=session_factory
+    )
 
     return ContentItemBatchResult(created=created, failed=failed)
 
