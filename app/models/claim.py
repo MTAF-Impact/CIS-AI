@@ -75,10 +75,19 @@ class Claim(Base):
     is_dormant: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # --- Cached activity block (folds in the old InterventionResponse entirely) ---
+    # activity_content is the single copyable block the PRD requires (US12/US20 - "one
+    # AI-generated, copyable content block"). For EXISTING claims it's the concatenation
+    # of the 3 debunk_* fields below; those are stored separately, additionally, so the
+    # FE can render the Truth Sandwich as 3 distinct labeled blocks (Fact / Flag / Fact
+    # Restated) instead of one run-on paragraph. NON_EXISTING claims (Prebunk) only ever
+    # populate activity_content - there's no equivalent structured breakdown for them.
     activity_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     activity_generated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    debunk_core_fact: Mapped[str | None] = mapped_column(Text, nullable=True)
+    debunk_nuanced_flag: Mapped[str | None] = mapped_column(Text, nullable=True)
+    debunk_reiterated_fact: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

@@ -94,6 +94,12 @@ class ExistingClaimDetailRead(BaseModel):
 
     activity_content: str | None
     activity_generated_at: datetime | None
+    # Truth Sandwich structure, split out for the FE to render as 3 distinct labeled
+    # blocks (Fact / Flag / Fact Restated) - activity_content above is still the single
+    # concatenated copyable block the PRD requires.
+    debunk_core_fact: str | None
+    debunk_nuanced_flag: str | None
+    debunk_reiterated_fact: str | None
 
     top_accounts: list[TopAccountEntry]
     supporting_statements: list[ContentItemRead]

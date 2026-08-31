@@ -44,6 +44,9 @@ async def generate_and_cache_debunk_activity(
     claim.activity_content = (
         f"{content.core_fact} {content.nuanced_flag} {content.reiterated_fact}"
     )
+    claim.debunk_core_fact = content.core_fact
+    claim.debunk_nuanced_flag = content.nuanced_flag
+    claim.debunk_reiterated_fact = content.reiterated_fact
     claim.activity_generated_at = datetime.now(UTC)
 
 
