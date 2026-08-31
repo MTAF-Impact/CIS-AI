@@ -14,8 +14,7 @@ class TopicRead(BaseModel):
 
 
 class TopicCreate(BaseModel):
-    """Manual topic creation, for cases outside the dynamic clustering-driven path
-    (see app.services.clustering_service.assign_or_create_topic)."""
+    """Manual topic creation, outside the dynamic clustering-driven path."""
 
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None

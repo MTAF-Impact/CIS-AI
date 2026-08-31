@@ -48,11 +48,7 @@ router = APIRouter(prefix="/claims", tags=["claims"])
 
 TOP_ACCOUNTS_LIMIT = 5
 
-# docs/AI-INTEGRATION.md's claim_type vocabulary table - aliases accepted for the
-# EXISTING/Generic claim type on the Flow 3 generate-generic webhook. Non-existing/
-# Synthetic claims are never generated here (they require a Policy, see
-# claim_prediction_service.predict_non_existing_claim); an unrecognized value is
-# rejected outright rather than silently coerced.
+# Aliases accepted for the Existing/Generic claim type on the Flow 3 webhook.
 GENERIC_CLAIM_TYPE_ALIASES = frozenset({"existing", "generic", "existing_claim", "generic_claim"})
 
 
@@ -82,8 +78,7 @@ async def _is_alerted(db: AsyncSession, claim_id: uuid.UUID) -> bool:
 
 
 async def _top_accounts(db: AsyncSession, claim_id: uuid.UUID) -> list[TopAccountEntry]:
-    """Top 5 accounts by post-volume contribution to this claim's Supporting side - see
-    TopAccountEntry's docstring for the interpretation-ambiguity note."""
+    """Top 5 accounts by post-volume on this claim's Supporting side."""
     rows = (
         await db.execute(
             select(ContentItem.author_id, func.count())
@@ -279,9 +274,7 @@ async def cluster_now(
 
 @router.post("/rescore", response_model=RescoreResponse)
 async def rescore(db: AsyncSession = Depends(get_db)) -> RescoreResponse:
-    """Time-based NPR/Velocity/discount/final re-evaluation for every EXISTING claim,
-    independent of clustering - NPR can drift purely from wall-clock time (old
-    opposing posts aging out of the rolling window) even with zero new content."""
+    """Time-based NPR/Velocity/discount/final re-evaluation for every Existing claim."""
     count = await rescore_all_existing_claims(db)
     return RescoreResponse(claims_rescored=count)
 
@@ -298,10 +291,7 @@ async def generate_generic_claim_webhook(
     llm: LLMClient = Depends(get_llm_client),
     embedder: EmbeddingService = Depends(get_embedding_service),
 ) -> GenerateGenericClaimWebhookResponse:
-    """Flow 3 of the Go backend integration contract (docs/AI-INTEGRATION.md in the
-    CIS-Backend repo) - the F4 "Generate Generic Claim" test button. Distinct from
-    admin.generate_generic_claim (our own richer, full-detail admin-panel response);
-    this returns exactly the minimal shape the backend's doc specifies."""
+    """Flow 3 - the F4 "Generate Generic Claim" test button, minimal response shape."""
     if payload.claim_type is not None and payload.claim_type.lower() not in GENERIC_CLAIM_TYPE_ALIASES:
         raise HTTPException(
             status_code=422,
@@ -337,9 +327,7 @@ async def predict(
     llm: LLMClient = Depends(get_llm_client),
     embedder: EmbeddingService = Depends(get_embedding_service),
 ) -> NonExistingClaimPredictResponse:
-    """Manual/ad-hoc prediction trigger for an already-registered F2 policy. The
-    automatic path is the AI matchmaking pipeline (US42), which runs this same
-    underlying logic on policy creation without needing this endpoint."""
+    """Manual/ad-hoc prediction trigger for an already-registered F2 policy."""
     policy = await db.get(Policy, payload.policy_id)
     if policy is None:
         raise HTTPException(status_code=404, detail="Policy not found")
@@ -385,8 +373,7 @@ async def update_status(
 async def confirm_harm(
     claim_id: uuid.UUID, payload: HarmConfirmRequest, db: AsyncSession = Depends(get_db)
 ) -> ExistingClaimDetailRead:
-    """Human confirms (optionally overriding) the AI-classified Harm sub-scores,
-    recomputing harm_score/claim_score/final_claim_score from the result."""
+    """Human confirms/overrides the AI-classified Harm sub-scores and recomputes scores."""
     claim = await db.get(Claim, claim_id)
     if claim is None or claim.claim_type != ClaimType.EXISTING:
         raise HTTPException(status_code=404, detail="Existing claim not found")
@@ -416,8 +403,7 @@ async def confirm_harm(
 
 @router.post("/{claim_id}/alert", response_model=ClaimListItemRead, status_code=201)
 async def add_alert(claim_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> ClaimListItemRead:
-    """Bell icon "Add" confirmation (US14) - F3 watchlist only ever accepts EXISTING
-    claims (US26)."""
+    """Bell icon "Add" confirmation - Existing claims only."""
     claim = await db.get(Claim, claim_id)
     if claim is None:
         raise HTTPException(status_code=404, detail="Claim not found")

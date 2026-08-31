@@ -22,8 +22,7 @@ class PolicyBrief(BaseModel):
 
 
 class ClaimListItemRead(BaseModel):
-    """Card shape for the D1 (Existing)/D2 (Non-Existing) dashboards - lightweight on
-    purpose; the full score breakdown is detail-only (see ExistingClaimDetailRead)."""
+    """Card shape for the D1/D2 dashboards - lightweight; full breakdown is detail-only."""
 
     id: uuid.UUID
     claim_type: ClaimType
@@ -38,8 +37,7 @@ class ClaimListItemRead(BaseModel):
 
 
 class ClaimListEnvelope(BaseModel):
-    """List response envelope - `fetched_at` satisfies the "last fetched" dashboard
-    requirement with zero new server state (wall-clock at response time)."""
+    """List response envelope - `fetched_at` is wall-clock at response time."""
 
     fetched_at: datetime
     total: int
@@ -47,23 +45,15 @@ class ClaimListEnvelope(BaseModel):
 
 
 class TopAccountEntry(BaseModel):
-    """US12's Top 5 Accounts panel - ranked by post-volume contribution to this claim's
-    Supporting side. INTERPRETATION FLAGGED by the PRD itself as an assumption pending
-    PM confirmation (top 5 driving/spreading vs. opposing vs. engagement vs. bot-like) -
-    implemented here as "top 5 accounts driving/spreading the claim" per the PRD's own
-    stated interpretation; revisit if the PM confirms a different reading."""
+    """Top 5 accounts by post-volume on the Supporting side - PRD flags this
+    interpretation as unconfirmed; revisit if the PM says otherwise."""
 
     account_handle: str
     contribution_count: int
 
 
 class ExistingClaimDetailRead(BaseModel):
-    """Every score field individually, never just the collapsed FinalClaimScore, per
-    the PRD's Dashboard Transparency Requirement (Section 5.5). `supporting_statements`/
-    `opposing_statements` are the PRD's "Positive Statements"/"Negative Statements" lists
-    (Section 3's earlier terminology for the same Supporting/Opposing stance concept
-    Section 5 formalizes) - `neutral_statements` isn't explicitly requested by the PRD
-    but is included for completeness rather than silently dropping that content."""
+    """Every score field individually, never just the collapsed FinalClaimScore."""
 
     id: uuid.UUID
     claim_type: ClaimType
@@ -94,9 +84,7 @@ class ExistingClaimDetailRead(BaseModel):
 
     activity_content: str | None
     activity_generated_at: datetime | None
-    # Truth Sandwich structure, split out for the FE to render as 3 distinct labeled
-    # blocks (Fact / Flag / Fact Restated) - activity_content above is still the single
-    # concatenated copyable block the PRD requires.
+    # Truth Sandwich, split for the FE to render as 3 labeled blocks.
     debunk_core_fact: str | None
     debunk_nuanced_flag: str | None
     debunk_reiterated_fact: str | None
@@ -127,10 +115,7 @@ class ClaimStatusUpdateRequest(BaseModel):
 
 
 class HarmConfirmRequest(BaseModel):
-    """Human confirmation of AI-classified Harm sub-scores. Any provided field
-    overrides the AI value; omitted fields keep the AI's original classification.
-    Always sets harm_human_confirmed=True and recomputes harm_score/claim_score/
-    final_claim_score from the (possibly overridden) sub-scores."""
+    """Human confirmation of AI-classified Harm sub-scores; omitted fields keep the AI value."""
 
     public_safety: float | None = Field(default=None, ge=0.0, le=100.0)
     institutional_trust: float | None = Field(default=None, ge=0.0, le=100.0)
@@ -149,9 +134,7 @@ class RescoreResponse(BaseModel):
 
 
 class NonExistingClaimPredictRequest(BaseModel):
-    """Manual/ad-hoc prediction trigger for an already-registered F2 policy - the
-    automatic path is the AI matchmaking pipeline (US42), which runs on policy
-    creation without needing this endpoint at all."""
+    """Manual/ad-hoc prediction trigger for an already-registered F2 policy."""
 
     policy_id: uuid.UUID
 

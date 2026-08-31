@@ -38,13 +38,10 @@ class ContentItem(Base):
     extracted_claim: Mapped[str | None] = mapped_column(Text, nullable=True)
     underlying_grievance: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Stance relative to the claim this item is clustered into - only assessable once a
-    # claim exists, so this stays NULL until an explicit LLM stance call assigns it
-    # during clustering (never defaulted). See app.services.clustering_service.
+    # NULL until clustered - only assessable relative to a specific claim.
     stance: Mapped[Stance | None] = mapped_column(String(16), nullable=True)
 
-    # Optional raw metrics for Reach (R) / Emotional Intensity (EI) scoring - populated
-    # by whatever upstream source feeds this API; default null/0 when absent.
+    # Optional raw metrics feeding Reach (R) / Emotional Intensity (EI).
     impressions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     positive_reaction_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     negative_reaction_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

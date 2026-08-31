@@ -11,10 +11,7 @@ from app.core.database import Base
 
 
 class OfficialSource(Base):
-    """Verified reference corpus (government policy docs, official statements, official
-    news) used for Falseness (F) scoring - see app.services.falseness_service. Starts
-    empty; populated later via scripts/load_official_sources.py once real documents are
-    supplied. Deliberately separate from Policy - see app.models.policy.Policy docstring."""
+    """Verified reference corpus for Falseness (F) scoring. Starts empty."""
 
     __tablename__ = "official_sources"
 

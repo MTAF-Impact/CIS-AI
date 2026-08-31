@@ -26,14 +26,8 @@ if TYPE_CHECKING:
 
 
 class Claim(Base):
-    """Replaces Narrative. claim_type is fixed by pipeline of origin (EXISTING claims
-    come from clustering real content; NON_EXISTING claims come from the prediction
-    flow and are never scored) - see app.services.clustering_service and
-    app.services.claim_prediction_service.
-
-    PRD v1.3 simplified the status model to one shared ClaimStatus set for both types
-    (no more type-specific PREBUNK/DEBUNK), so there is no longer a status/type CHECK
-    constraint here."""
+    """claim_type is fixed by pipeline of origin - Existing from clustering, Non-Existing
+    from prediction (never scored)."""
 
     __tablename__ = "claims"
 
@@ -56,7 +50,7 @@ class Claim(Base):
     )
     first_caught_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    # --- Scoring (EXISTING only; stay NULL for NON_EXISTING, which is never scored) ---
+    # --- Scoring (Existing only; NULL for Non-Existing) ---
     reach_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     velocity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     falseness_score: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -74,13 +68,9 @@ class Claim(Base):
     final_claim_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_dormant: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    # --- Cached activity block (folds in the old InterventionResponse entirely) ---
-    # activity_content is the single copyable block the PRD requires (US12/US20 - "one
-    # AI-generated, copyable content block"). For EXISTING claims it's the concatenation
-    # of the 3 debunk_* fields below; those are stored separately, additionally, so the
-    # FE can render the Truth Sandwich as 3 distinct labeled blocks (Fact / Flag / Fact
-    # Restated) instead of one run-on paragraph. NON_EXISTING claims (Prebunk) only ever
-    # populate activity_content - there's no equivalent structured breakdown for them.
+    # --- Cached Debunk/Prebunk activity ---
+    # activity_content is the single copyable block; debunk_* are the same content split
+    # into 3 labeled parts (Existing claims only) so the FE can render them separately.
     activity_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     activity_generated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

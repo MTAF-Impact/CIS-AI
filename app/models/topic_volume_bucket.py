@@ -9,11 +9,7 @@ from app.core.database import Base
 
 
 class TopicVolumeBucket(Base):
-    """Lightweight hourly rolling-history table used to compute Velocity's z-score
-    against a topic's historical baseline growth rate. Incremented whenever a
-    Supporting-stance ContentItem attaches to (or creates) an EXISTING claim in that
-    topic. Queried Python-side (small demo-scale volumes) rather than via a time-series
-    dependency."""
+    """Hourly rolling history backing Velocity's z-score baseline per topic."""
 
     __tablename__ = "topic_volume_buckets"
     __table_args__ = (UniqueConstraint("topic_id", "bucket_start", name="uq_topic_bucket"),)

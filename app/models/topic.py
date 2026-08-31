@@ -15,9 +15,7 @@ if TYPE_CHECKING:
 
 
 class Topic(Base):
-    """A dynamically-formed grouping of Claims, assigned via embedding-centroid
-    similarity at claim-creation time (see app.services.clustering_service.assign_or_create_topic)
-    - not a fixed/seeded taxonomy."""
+    """A dynamically-formed grouping of Claims - not a fixed/seeded taxonomy."""
 
     __tablename__ = "topics"
 

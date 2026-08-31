@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class EmbeddingService:
-    """Generates dense text embeddings using a local sentence-transformers model."""
+    """Dense text embeddings via a local sentence-transformers model."""
 
     def __init__(self, model_name: str | None = None) -> None:
         self._model_name = model_name or settings.EMBEDDING_MODEL_NAME

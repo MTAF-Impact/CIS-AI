@@ -14,8 +14,7 @@ from app.services.content_ingestion_service import (
 from app.services.embedding_service import EmbeddingService
 from app.services.llm_client import LLMClient
 
-# Enough posts for a demo claim to look real (mixed stance) without being slow to
-# generate - well under the NPR reliability threshold, so it won't get discounted.
+# Enough for a realistic mixed-stance demo claim without being slow to generate.
 DEMO_CLAIM_POST_COUNT = 6
 
 
@@ -43,11 +42,7 @@ async def generate_demo_existing_claim(
     embedder: EmbeddingService,
     topic_hint: str | None = None,
 ) -> Claim:
-    """One-click sample Existing claim (US33): fabricates a small, internally-consistent
-    cluster of posts via the LLM, then runs it through the exact same claim-construction
-    and scoring pipeline as a real HDBSCAN-formed cluster - see
-    clustering_service.build_claim_from_content_items - rather than a separate,
-    parallel "fake claim" code path that could drift out of sync with real scoring."""
+    """One-click sample Existing claim (US33) via the same construction pipeline HDBSCAN uses."""
     grounding_context = await build_grounding_context(db)
     posts = await llm.generate_synthetic_posts(DEMO_CLAIM_POST_COUNT, topic_hint, grounding_context)
 

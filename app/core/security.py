@@ -1,8 +1,4 @@
-"""Auth for the Go backend's inbound webhooks (see docs/AI-INTEGRATION.md in the
-CIS-Backend repo). Both sides treat the shared secret as optional - the current
-deployment leaves AI_SERVICE_API_KEY unset (private network only), in which case every
-request is accepted with no header at all, matching the backend's own documented
-behavior for INTERNAL_API_KEY."""
+"""Optional auth for the Go backend's inbound webhooks. No-op if AI_SERVICE_API_KEY is unset."""
 
 import hmac
 

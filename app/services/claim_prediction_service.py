@@ -1,7 +1,4 @@
-"""Predicts NON_EXISTING claims for a policy (PRD Section 3.3 / D2, and the F2 AI
-matchmaking pipeline's US42(b)). NON_EXISTING claims have no content by construction and
-are never scored - see app.models.claim.Claim's claim_type docstring for the
-fixed-by-pipeline-of-origin reasoning."""
+"""Predicts Non-Existing claims for a policy (D2 / US42(b)) - never scored."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -32,10 +29,7 @@ async def predict_non_existing_claim(
     embedder: EmbeddingService,
     already_covered_claim_statements: list[str] | None = None,
 ) -> NonExistingClaimPrediction:
-    """Predicts one new NON_EXISTING claim for `policy`. If
-    `already_covered_claim_statements` is given (the Existing claims the matchmaking
-    pipeline already confirmed-matched to this policy), the LLM is asked to predict a
-    claim distinct from those, rather than duplicating an aspect already covered."""
+    """Predicts one new Non-Existing claim for `policy`, distinct from any already-matched claims."""
     fault_lines = await rag_service.retrieve_relevant_fault_lines(
         db, f"{policy.title} {policy.description or ''}", embedder
     )

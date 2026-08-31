@@ -9,13 +9,10 @@ _RESERVED_LOG_RECORD_ATTRS = frozenset(logging.LogRecord("", 0, "", 0, "", (), N
 
 
 class JSONFormatter(logging.Formatter):
-    """Structured JSON log formatter compatible with Google Cloud Logging's expected
-    fields (`severity`, `message`, `timestamp`) so Cloud Run picks up log level and
-    text correctly without extra configuration."""
+    """JSON formatter with the severity/message/timestamp fields Cloud Logging expects."""
 
     def format(self, record: logging.LogRecord) -> str:
-        # Note: logging.Formatter.formatTime() delegates to time.strftime(), which does
-        # NOT support %f (microseconds) - only datetime.strftime() does. Build it manually.
+        # time.strftime() (used by the base formatTime) doesn't support %f - build manually.
         timestamp = datetime.fromtimestamp(record.created, tz=UTC).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
@@ -40,12 +37,11 @@ class JSONFormatter(logging.Formatter):
 
 
 def configure_logging(level: str = "INFO", json_format: bool = False) -> None:
-    """Configure the root logger once, for both the app and any script (e.g. seeding)."""
+    """Configure the root logger once, for both the app and any script."""
     root = logging.getLogger()
     root.setLevel(level.upper())
 
-    # Idempotent: avoid duplicate handlers if called more than once (e.g. under --reload).
-    root.handlers.clear()
+    root.handlers.clear()  # idempotent under --reload
 
     handler = logging.StreamHandler(sys.stdout)
     if json_format:
@@ -63,7 +59,7 @@ def configure_logging(level: str = "INFO", json_format: bool = False) -> None:
 
 
 class Timer:
-    """Small context manager for measuring elapsed time in milliseconds for log fields."""
+    """Context manager measuring elapsed time in milliseconds."""
 
     def __enter__(self) -> Self:
         self._start = time.perf_counter()

@@ -1,16 +1,7 @@
-"""F2 AI matchmaking pipeline (US42) - links a Policy to any Existing claims already in
-the databank that are genuinely about it, then predicts one new Non-Existing claim for
-whatever aspect of the policy isn't already covered by a matched claim.
-
-Two triggers call this, both as FastAPI BackgroundTasks jobs (the request that created
-the Policy/received the webhook has already returned and its request-scoped DB session
-is closed by the time this runs, so it opens and owns its own AsyncSession):
-
-- match_and_predict_claims_for_policy: our own internal POST /policies upload flow.
-- run_matchmaking_webhook: Flow 1 of the Go backend integration contract
-  (docs/AI-INTEGRATION.md in the CIS-Backend repo) - the backend owns policy upload/
-  storage and POSTs policy metadata + a signed document URL here; when done, this
-  reports back via Flow 2 (app.services.backend_callback_service)."""
+"""F2 AI matchmaking (US42): links a Policy to matching Existing claims, then predicts
+one new Non-Existing claim. Two triggers, both BackgroundTasks jobs:
+match_and_predict_claims_for_policy (our own POST /policies) and run_matchmaking_webhook
+(Go backend's Flow 1, see docs/GO_INTEGRATION.md)."""
 
 import logging
 import uuid
@@ -35,16 +26,14 @@ logger = logging.getLogger(__name__)
 
 DOCUMENT_FETCH_TIMEOUT_SECONDS = 30.0
 
-# Loose cosine prefilter before the (more expensive, more precise) LLM confirmation call
-# - bounds how many candidates get sent to the LLM without missing plausible matches.
+# Cosine prefilter before the LLM confirmation call, to bound candidate count.
 CLAIM_MATCH_PREFILTER_THRESHOLD = 0.35
 MAX_MATCH_CANDIDATES = 20
 POLICY_TEXT_EXCERPT_CHARS = 4000
 
 
 async def _run(db, policy: Policy, llm: LLMClient, embedder: EmbeddingService) -> tuple[int, int]:
-    """Returns (matched_claim_count, generated_claim_count) - purely informational,
-    consumed by run_matchmaking_webhook's Flow 2 callback."""
+    """Returns (matched_claim_count, generated_claim_count) for the Flow 2 callback."""
     policy_text = (
         f"{policy.title}\n{policy.description or ''}\n"
         f"{(policy.extracted_text or '')[:POLICY_TEXT_EXCERPT_CHARS]}"
@@ -117,11 +106,7 @@ async def match_and_predict_claims_for_policy(
     embedder: EmbeddingService | None = None,
     session_factory: async_sessionmaker | None = None,
 ) -> None:
-    """Runs as a FastAPI BackgroundTasks job - see app.api.v1.endpoints.policies. Takes
-    its session factory as a parameter (rather than importing AsyncSessionLocal
-    directly) so tests can point it at the test database via
-    Depends(get_session_factory) - a background task can't use a request-scoped
-    Depends(get_db), so this is the only way its DB access stays test-overridable."""
+    """BackgroundTasks job for POST /policies - see app.api.v1.endpoints.policies."""
     llm = llm or get_llm_client()
     embedder = embedder or get_embedding_service()
     session_factory = session_factory or get_session_factory()
@@ -143,9 +128,7 @@ async def match_and_predict_claims_for_policy(
 async def _fetch_and_extract(
     file_name: str | None, file_mime_type: str | None, document_url: str | None
 ) -> tuple[str | None, bytes | None]:
-    """Best-effort: any failure (signed URL expired, unsupported type, fetch error)
-    falls back to (None, None) rather than aborting the webhook - the backend's own doc
-    says to "work from the name alone" when the document can't be used."""
+    """Best-effort: any fetch/extract failure falls back to (None, None)."""
     if not document_url:
         return None, None
     try:
@@ -178,15 +161,8 @@ async def run_matchmaking_webhook(
     embedder: EmbeddingService | None = None,
     session_factory: async_sessionmaker | None = None,
 ) -> None:
-    """Flow 1 handler (see app.api.v1.endpoints.matchmaking) - creates our own Policy
-    row for a backend-uploaded policy, runs the matchmaking pipeline, then always
-    reports back via Flow 2 (app.services.backend_callback_service), success or
-    failure. `backend_policy_id` (the backend's cis_policies.id) is persisted on our
-    own Policy.backend_policy_id specifically so a retry of the same policy_id (the
-    backend's own daily retry job, or an operator-triggered POST /policies/:id/rematch)
-    is detected and just re-reports the existing result instead of re-running the
-    pipeline - docs/api/internal.md requires this endpoint be idempotent per policy_id
-    and never duplicate the generated Non-Existing claim."""
+    """Flow 1 handler - creates a Policy for a backend-uploaded policy, runs matchmaking,
+    always reports back via Flow 2. Idempotent per backend_policy_id (see GO_INTEGRATION.md)."""
     llm = llm or get_llm_client()
     embedder = embedder or get_embedding_service()
     session_factory = session_factory or get_session_factory()

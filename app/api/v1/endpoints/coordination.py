@@ -12,8 +12,5 @@ async def check_cib(
     payload: CIBCheckRequest,
     embedder: EmbeddingService = Depends(get_embedding_service),
 ) -> CIBCheckResponse:
-    """Deterministic heuristic check for Coordinated Inauthentic Behavior across a
-    list of posts: burst timing (<10 min), text similarity (>0.80 cosine), and
-    account-creation clustering. D3 (Coordinated-Network Detector) dashboard is
-    explicitly deferred in the PRD - this endpoint is the groundwork for it."""
+    """Deterministic CIB heuristic - groundwork for F5, which is deferred in the PRD."""
     return detect_coordinated_behavior(payload.posts, embedder=embedder)
