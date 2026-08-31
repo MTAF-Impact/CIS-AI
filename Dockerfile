@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # ---------- Build stage ----------
 FROM python:3.11-slim AS builder
 
@@ -11,16 +9,18 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
-# Install dependencies first (separate layer, cached while only app code changes)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --frozen --no-install-project --no-dev
+# Install dependencies first (separate layer, cached while only app code changes).
+# Deliberately no BuildKit `RUN --mount=...` cache/bind syntax here - Cloud Run's
+# default "deploy from source" build pipeline runs the classic (non-BuildKit) docker
+# builder, which rejects that syntax outright ("the --mount option requires BuildKit").
+# This trades away persistent cross-build uv cache for guaranteed build-pipeline
+# portability; Docker's normal layer cache still applies within a single build.
+COPY uv.lock pyproject.toml /app/
+RUN uv sync --frozen --no-install-project --no-dev
 
 COPY . /app
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev
 
 # ---------- Runtime stage ----------
 FROM python:3.11-slim
