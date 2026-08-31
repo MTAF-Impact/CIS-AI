@@ -1,7 +1,4 @@
-"""Shared building blocks for turning a raw post (real or LLM-fabricated) into a
-persisted ContentItem, and for building light thematic grounding context for LLM
-generation prompts. Used by the real ingestion endpoints, the synthetic-data generator,
-and the F4 "Generate Generic Claim" demo utility."""
+"""Shared helpers: build a ContentItem from a raw post, and light grounding context."""
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,8 +9,7 @@ from app.models.topic import Topic
 from app.schemas.content import ContentItemCreate
 from app.services.llm_client import LLMClient
 
-# Caps how much existing fault-line/topic context is fed back into generation prompts -
-# just enough for thematic continuity, not a full corpus dump.
+# Caps how much context feeds back into generation prompts.
 GROUNDING_FAULT_LINE_LIMIT = 5
 GROUNDING_TOPIC_LIMIT = 10
 

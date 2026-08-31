@@ -13,8 +13,7 @@ async def retrieve_relevant_fault_lines(
     embedder: EmbeddingService | None = None,
     top_k: int = DEFAULT_TOP_K,
 ) -> list[FaultLine]:
-    """Vector similarity search over known community fault lines, used to ground
-    Prebunk predictions and Truth Sandwich corrections in real local context."""
+    """Vector similarity search over fault lines, to ground generated content."""
     embedder = embedder or get_embedding_service()
     query_embedding = embedder.embed(query_text)
 
@@ -29,8 +28,7 @@ async def retrieve_relevant_fault_lines(
 
 
 def build_grounding_context(fault_lines: list[FaultLine], extra_notes: str | None = None) -> str:
-    """Render retrieved fault lines (and any extra grounding text) into a plain-text
-    context block suitable for a OpenAI prompt."""
+    """Render fault lines into a plain-text grounding block for a prompt."""
     lines: list[str] = []
     for fl in fault_lines:
         entry = f"- [{fl.community_name}] {fl.grievance_theme}"

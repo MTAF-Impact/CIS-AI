@@ -1,9 +1,4 @@
-"""Claim clustering pipeline - Pass 1 (attach unclustered ContentItems to existing
-EXISTING claims) then Pass 2 (HDBSCAN the remainder into new EXISTING claims), followed
-by dynamic Topic assignment, stance classification, and the full R/V/F/H/EI/NPR scoring
-pass for every claim touched. See the PRD rearchitecture plan (sections 1-3) for the
-full design rationale.
-"""
+"""Claim clustering: attach-or-create pipeline, topic assignment, stance, and scoring."""
 
 import logging
 import statistics
@@ -52,10 +47,7 @@ def _centroid(vectors: list[list[float]]) -> np.ndarray:
 async def assign_or_create_topic(
     db: AsyncSession, claim_embedding: list[float], candidate_label: str
 ) -> Topic:
-    """Dynamic, embedding-centroid based topic assignment - mirrors the ContentItem->Claim
-    attach-or-create pattern one level up (per the user's explicit choice of dynamic
-    topics over a fixed taxonomy). Used identically by both EXISTING claim creation
-    (Pass 2 below) and NON_EXISTING claim prediction (app.services.claim_prediction_service)."""
+    """Attach to the nearest topic by centroid similarity, or create a new one."""
     existing_topics = list(
         (await db.execute(select(Topic).where(Topic.embedding.is_not(None)))).scalars().all()
     )
@@ -115,10 +107,7 @@ async def _reach_inputs(db: AsyncSession, claim_id: uuid.UUID) -> tuple[int, int
 
 
 async def renormalize_topic_reach(db: AsyncSession, topic_id: uuid.UUID) -> list[Claim]:
-    """Min-max normalizes raw Reach across every EXISTING claim in a topic (scoped
-    per-topic - see scoring_engine.normalize_minmax_per_topic). Returns the full claim
-    list so the caller can also rescore them (a reach change makes their cached
-    claim_score/final_claim_score stale even if nothing else about them changed)."""
+    """Min-max normalize Reach across every claim in a topic; returns the touched claims."""
     claims = list(
         (
             await db.execute(
@@ -180,10 +169,7 @@ async def _claim_volume_windows(
 
 
 async def _topic_velocity_baseline(db: AsyncSession, topic_id: uuid.UUID) -> tuple[float, float]:
-    """Baseline growth-rate distribution for Velocity's z-score, derived from
-    bucket-over-bucket volume deltas in TopicVolumeBucket history. Cold-start (fewer
-    than 3 buckets) returns (0, 0), which velocity_zscore treats as "no baseline yet"
-    and neutrally squashes to 50."""
+    """Baseline growth-rate mean/std for Velocity's z-score; (0, 0) if fewer than 3 buckets."""
     rows = (
         await db.execute(
             select(TopicVolumeBucket.supporting_volume)
@@ -222,10 +208,7 @@ async def _npr_volumes(
 async def _emotional_intensity_inputs(
     db: AsyncSession, claim_id: uuid.UUID, stance: Stance
 ) -> tuple[float, float] | None:
-    """Returns (avg_outrage, negative_reaction_ratio) for the given stance's content, or
-    None if there's no content with that stance yet (distinguishes "genuinely zero
-    intensity" from "nothing to measure" - matters for emotional_intensity_opposing,
-    which should stay unset until Opposing content actually exists)."""
+    """(avg_outrage, negative_reaction_ratio) for a stance, or None if no such content yet."""
     row = (
         await db.execute(
             select(
@@ -247,10 +230,7 @@ async def _emotional_intensity_inputs(
 
 
 async def rescore_claim(db: AsyncSession, claim: Claim) -> None:
-    """Recomputes everything EXCEPT Reach (handled separately per-topic by
-    renormalize_topic_reach, which must run first) and Harm (classified once at claim
-    creation - see the Pass 2 harm block below; it doesn't drift with new supporting
-    volume the way Velocity/NPR do)."""
+    """Recomputes V/F/EI/NPR/discount/final. Reach and Harm are handled elsewhere."""
     supporting_vol, opposing_vol = await _npr_volumes(db, claim.id, scoring_engine.ROLLING_WINDOW_HOURS)
     npr, is_dormant = scoring_engine.compute_npr(supporting_vol, opposing_vol)
     discount = scoring_engine.discount_factor(npr, supporting_vol + opposing_vol)
@@ -271,8 +251,7 @@ async def rescore_claim(db: AsyncSession, claim: Claim) -> None:
     supporting_ei_inputs = await _emotional_intensity_inputs(db, claim.id, Stance.SUPPORTING)
     ei = scoring_engine.emotional_intensity(*supporting_ei_inputs) if supporting_ei_inputs else 0.0
 
-    # Display-only diagnostic (PRD Section 5.4.6) - computed the same way as EI but on
-    # Opposing-side content, and NEVER fed into claim_score/discount/final below.
+    # Display-only - never fed into scoring.
     opposing_ei_inputs = await _emotional_intensity_inputs(db, claim.id, Stance.OPPOSING)
     ei_opposing = (
         scoring_engine.emotional_intensity(*opposing_ei_inputs) if opposing_ei_inputs else None
@@ -292,16 +271,11 @@ async def rescore_claim(db: AsyncSession, claim: Claim) -> None:
     claim.claim_score = score
     claim.final_claim_score = final
 
-    # Powers the F3 trend chart [C1] - Claim only ever holds the current score, so this
-    # is the only history of how FinalClaimScore moved over time.
     db.add(ClaimScoreSnapshot(claim_id=claim.id, final_claim_score=final))
 
 
 async def rescore_all_existing_claims(db: AsyncSession) -> int:
-    """Standalone rescore, independent of clustering - NPR/Velocity can drift purely
-    from wall-clock time (old opposing posts aging out of the rolling window) even with
-    zero new content, so this can't only run reactively during clustering. Powers
-    POST /claims/rescore."""
+    """Standalone rescore of every existing claim, independent of clustering."""
     topics = list((await db.execute(select(Topic.id))).scalars().all())
     rescored = 0
     for topic_id in topics:
@@ -319,14 +293,8 @@ async def build_claim_from_content_items(
     llm: LLMClient,
     embedder: EmbeddingService,
 ) -> Claim:
-    """Creates one new EXISTING claim from a set of already-persisted, not-yet-clustered
-    ContentItems: summarizes the claim statement, assigns a dynamic Topic, classifies
-    every item's stance, classifies Harm once, and eagerly caches the Debunk Activity.
-
-    Shared by cluster_unclustered_content's Pass 2 (HDBSCAN-formed clusters) and
-    app.services.admin_service's "Generate Generic Claim" demo utility (US33), which
-    hands it a deterministic, LLM-fabricated cluster instead of an HDBSCAN one - the
-    claim-construction logic itself is identical either way."""
+    """Build one new existing claim from a cluster of content items. Shared by Pass 2
+    below and admin_service's demo-claim generator."""
     sample_texts = [item.text for item in cluster_items[:MAX_SAMPLE_TEXTS_FOR_SUMMARY]]
     try:
         summary = await llm.summarize_claim(sample_texts)
@@ -396,21 +364,9 @@ async def cluster_unclustered_content(
     llm: LLMClient | None = None,
     embedder: EmbeddingService | None = None,
 ) -> ClusterResult:
-    """Cluster all not-yet-clustered ContentItems into Claims.
-
-    1. Attach unclustered items to an existing EXISTING claim if they are close enough
-       to its claim_statement embedding (keeps claims dynamic/growing rather than
-       fragmenting), classifying each attached item's stance via an explicit LLM call
-       (never defaulted - a centroid-proximity match can be a rebuttal just as easily
-       as agreement).
-    2. Cluster whatever remains with HDBSCAN and create new EXISTING claims for each
-       cluster (label -1 = noise is left unclustered), assigning a dynamic Topic,
-       batch-classifying stance, classifying Harm once, and eagerly generating the
-       cached Debunk Activity.
-    3. Renormalize Reach per touched topic, then run the full R/V/F/H/EI/NPR scoring
-       pass for every claim in a touched topic (not just directly-touched claims - a
-       sibling's Reach renormalization makes their cached score stale too).
-    """
+    """Cluster all not-yet-clustered ContentItems into Claims: attach to an existing
+    claim where close enough, HDBSCAN the rest into new claims, then rescore every
+    touched topic."""
     llm = llm or get_llm_client()
     embedder = embedder or get_embedding_service()
 
@@ -522,14 +478,7 @@ async def cluster_unclustered_content_task(
     embedder: EmbeddingService | None = None,
     session_factory: async_sessionmaker | None = None,
 ) -> None:
-    """Fire-and-forget wrapper for FastAPI BackgroundTasks - see app.api.v1.endpoints.
-    ingestion. Ingestion (POST /ingest, /ingest/batch) is meant to be hit repeatedly by
-    an upstream crawler/scheduler, so clustering must run automatically as a side effect
-    of ingesting content, the same way F2's AI matchmaking pipeline runs automatically
-    after a Policy is created - never a separate manual step. Opens its own AsyncSession
-    since the request that triggered this has already returned and its request-scoped
-    session is closed by the time this runs (same reasoning as
-    policy_matchmaking_service.match_and_predict_claims_for_policy)."""
+    """BackgroundTasks wrapper - opens its own session since the request is already done."""
     session_factory = session_factory or get_session_factory()
     async with session_factory() as db:
         try:

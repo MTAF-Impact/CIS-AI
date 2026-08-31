@@ -1,7 +1,4 @@
-"""Flow 1 of the Go backend integration contract (docs/AI-INTEGRATION.md in the
-CIS-Backend repo): the backend POSTs here after a policy is uploaded through F2. See
-app.services.policy_matchmaking_service.run_matchmaking_webhook for the pipeline and
-the Flow 2 callback it reports back through."""
+"""Flow 1: the Go backend POSTs here after a policy is uploaded through F2."""
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.ext.asyncio import async_sessionmaker

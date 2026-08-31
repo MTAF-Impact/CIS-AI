@@ -1,6 +1,4 @@
-"""Extracts plain text from an uploaded policy document (PDF or Word), for the F2 policy
-upload flow (US40) - the extracted text feeds the AI matchmaking pipeline
-(policy_matchmaking_service.py) as its grounding input."""
+"""Extracts plain text from an uploaded policy document (PDF or Word)."""
 
 import io
 
@@ -14,7 +12,7 @@ DOCX_CONTENT_TYPES = frozenset(
 
 
 class UnsupportedDocumentTypeError(ValueError):
-    """Raised when a file is neither a PDF nor a Word (.docx) document."""
+    """Not a PDF or Word (.docx) document."""
 
 
 def extract_text(filename: str, content_type: str | None, data: bytes) -> str:

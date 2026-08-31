@@ -1,11 +1,4 @@
-"""Renders and caches the single AI-generated Activity content block per claim - folds in
-the old InterventionResponse entirely (Claim.status itself is the review-state lifecycle
-the PRD wants, so there's no separate approve/reject workflow to maintain here).
-
-Generation is eager and one-time: every function here is idempotent and never re-calls
-the LLM once activity_content is already set, per the PRD's "generated ONCE at claim
-creation" requirement.
-"""
+"""Generates and caches each claim's Debunk/Prebunk Activity content - once only."""
 
 import logging
 from datetime import UTC, datetime
@@ -23,10 +16,7 @@ logger = logging.getLogger(__name__)
 async def generate_and_cache_debunk_activity(
     db: AsyncSession, claim: Claim, llm: LLMClient, embedder: EmbeddingService
 ) -> None:
-    """Debunk Activity for an EXISTING claim: the LLM still returns a structured
-    Truth Sandwich (core_fact/nuanced_flag/reiterated_fact) for generation quality, but
-    only the rendered concatenation is persisted - the PRD wants one copyable block,
-    not separate sub-fields."""
+    """Debunk Activity for an Existing claim - the Truth Sandwich, once only."""
     if claim.activity_content is not None:
         return
 
@@ -51,7 +41,5 @@ async def generate_and_cache_debunk_activity(
 
 
 def render_prebunk_activity(inoculation_explainer: str) -> str:
-    """Prebunk Activity for a NON_EXISTING claim is just the inoculation explainer
-    itself - predicted_attack_angle/likely_framing are useful LLM reasoning context
-    (returned to the caller separately) but are not part of the publishable content."""
+    """Prebunk Activity for a Non-Existing claim - just the inoculation explainer."""
     return inoculation_explainer

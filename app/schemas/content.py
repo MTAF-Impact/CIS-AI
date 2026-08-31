@@ -11,8 +11,7 @@ class ContentItemCreate(BaseModel):
     source: ContentSource = ContentSource.OTHER
     author_id: str | None = None
     location: str | None = None
-    # Optional raw metrics for Reach (R) / Emotional Intensity (EI) scoring - populated
-    # by whatever upstream source feeds this API; default null when absent.
+    # Optional raw metrics feeding Reach (R) / Emotional Intensity (EI).
     impressions: int | None = None
     positive_reaction_count: int | None = None
     negative_reaction_count: int | None = None
@@ -48,9 +47,7 @@ class ContentItemBatchResult(BaseModel):
 
 
 class SyntheticIngestRequest(BaseModel):
-    """Trigger the LLM to fabricate `count` posts and run them through the normal ingest
-    pipeline - a stand-in for the live crawler, which isn't wired up for this prototype.
-    Intended to be hit on demand, e.g. a "Generate sample data" button in the FE."""
+    """Fabricate `count` posts via the LLM and run them through the normal ingest pipeline."""
 
     count: int = Field(default=10, ge=1, le=50)
     topic_hint: str | None = Field(default=None, max_length=255)

@@ -1,7 +1,4 @@
-"""Request/response shapes for the Go backend's 3 documented HTTP touchpoints (see
-docs/AI-INTEGRATION.md in the CIS-Backend repo) - Flow 1 (inbound policy webhook) and
-Flow 3 (inbound generate-generic-claim) here; Flow 2's outbound callback body is built
-directly in app.services.backend_callback_service, since nothing here consumes it."""
+"""Request/response shapes for Flow 1 and Flow 3 of the Go backend integration."""
 
 import uuid
 from datetime import date

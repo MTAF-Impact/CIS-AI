@@ -9,9 +9,7 @@ SINGLETON_ID = 1
 
 
 class AdminSetting(Base):
-    """F4 - a single global config row (US32). `id` is always SINGLETON_ID; there is
-    exactly one row, upserted in place rather than modeled as a key-value table, since
-    there is currently only one setting."""
+    """F4 - a single global config row, upserted in place. `id` is always SINGLETON_ID."""
 
     __tablename__ = "admin_settings"
 

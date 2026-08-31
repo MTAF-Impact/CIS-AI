@@ -30,9 +30,7 @@ router = APIRouter(prefix="/policies", tags=["policies"])
 
 
 async def _latest_linked_claim_activity(db: AsyncSession, policy_id: uuid.UUID) -> datetime | None:
-    """US35's sort key: the latest created_at among ANY claim linked to this policy
-    (many-to-many Existing via ClaimPolicy, one-to-many Non-Existing via
-    Claim.policy_id) - not the policy's own creation date."""
+    """Latest created_at among any claim linked to this policy, not the policy's own."""
     existing_max = (
         await db.execute(
             select(func.max(Claim.created_at))
@@ -65,8 +63,7 @@ async def list_policies(
     total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
     policies = list((await db.execute(stmt)).scalars().all())
 
-    # US35: policies with linked-claim activity first (most recent first), then
-    # policies with no linked claims yet, by their own creation date (most recent first).
+    # Policies with linked-claim activity first, then the rest by creation date.
     ranked = []
     for policy in policies:
         latest = await _latest_linked_claim_activity(db, policy.id)
@@ -90,10 +87,7 @@ async def create_policy(
     llm: LLMClient = Depends(get_llm_client),
     embedder: EmbeddingService = Depends(get_embedding_service),
 ) -> Policy:
-    """US40 - the only 3 fields the "Add Public Policy" modal collects. Immediately
-    after commit, kicks off the AI matchmaking pipeline (US42) in the background - the
-    response returns right away with processing=True; the FE shows the "Processing"
-    badge until a later fetch shows processing=False."""
+    """The 3 "Add Public Policy" fields. Kicks off AI matchmaking in the background."""
     data = await file.read()
     try:
         extracted_text = extract_text(file.filename or "", file.content_type, data)
@@ -125,8 +119,7 @@ async def create_policy(
 
 @router.get("/{policy_id}", response_model=PolicyDetailRead)
 async def get_policy(policy_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> PolicyDetailRead:
-    """US39 - correlated Existing/Non-Existing claims, using the exact same card
-    component/behavior as F1's S1 (US10)/S2 (US18) - no policy-specific variant."""
+    """Correlated Existing/Non-Existing claims, same card shape as F1's lists."""
     policy = await db.get(Policy, policy_id)
     if policy is None:
         raise HTTPException(status_code=404, detail="Policy not found")

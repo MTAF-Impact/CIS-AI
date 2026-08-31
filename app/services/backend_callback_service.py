@@ -1,7 +1,4 @@
-"""Flow 2 of the Go backend integration contract (docs/AI-INTEGRATION.md in the
-CIS-Backend repo): reports the outcome of the US42 matchmaking pipeline back to the
-backend. This is the only outbound call this service makes to the backend - everything
-else is either the backend calling us (Flow 1, Flow 3) or plain reads of our tables."""
+"""Flow 2: reports the matchmaking pipeline's outcome back to the Go backend."""
 
 import logging
 import uuid
@@ -24,10 +21,8 @@ async def report_matchmaking_result(
     generated_claim_count: int | None = None,
     error: str | None = None,
 ) -> None:
-    """Best-effort: a failed callback is logged, never raised - the matchmaking work
-    itself already happened and shouldn't be treated as failed just because the report
-    didn't land. The backend's own retry job (up to 3x daily) and the operator-triggered
-    POST /policies/:id/rematch exist precisely to cover this case."""
+    """Best-effort: a failed callback is logged, never raised - the backend's own retry
+    job covers this case."""
     if not settings.BACKEND_URL:
         logger.warning(
             "BACKEND_URL not configured - skipping matchmaking-result callback for "

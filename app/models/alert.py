@@ -9,10 +9,7 @@ from app.core.database import Base
 
 
 class ClaimAlert(Base):
-    """F3 watchlist (C3) - a claim only appears here once a user explicitly adds it via
-    the F1 bell icon (US14). EXISTING claims only, per US26 - enforced at the service
-    layer, not here, since the DB has no clean way to express "claim_type = existing"
-    as a FK-level constraint."""
+    """F3 watchlist. Existing claims only - enforced at the service layer, not here."""
 
     __tablename__ = "claim_alerts"
 
@@ -25,9 +22,7 @@ class ClaimAlert(Base):
 
 
 class ClaimScoreSnapshot(Base):
-    """A point-in-time FinalClaimScore recording, appended every time a claim is
-    (re)scored - powers the F3 trend chart [C1], which needs FinalClaimScore over time.
-    Claim itself only ever holds the current score, so this is the only history."""
+    """Point-in-time FinalClaimScore, appended on every rescore - powers the F3 trend chart."""
 
     __tablename__ = "claim_score_snapshots"
 

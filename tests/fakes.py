@@ -1,10 +1,4 @@
-"""Test doubles for external services (OpenAI, sentence-transformers) so the test suite
-never needs a real API key or network access to run.
-
-FakeLLMClient implements the exact same public interface as app.services.llm_client.LLMClient
-so it can be swapped in via FastAPI's dependency_overrides or passed directly to service
-functions that accept an `llm` parameter.
-"""
+"""Test doubles for external services so the test suite never needs a real API key."""
 
 from app.models.enums import ContentSource, MoralFoundation, Stance
 from app.schemas.analysis import (
@@ -31,8 +25,7 @@ def _fake_topic_label(text: str) -> str:
 
 
 class FakeLLMClient:
-    """Deterministic stand-in for LLMClient. Classification/stance are keyword-driven
-    so tests can assert on realistic-looking downstream behavior without a live model call."""
+    """Deterministic stand-in for LLMClient - classification/stance are keyword-driven."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple, dict]] = []
@@ -50,11 +43,7 @@ class FakeLLMClient:
 
     async def summarize_claim(self, sample_texts: list[str]) -> ClaimSummarySchema:
         self.calls.append(("summarize_claim", (sample_texts,), {}))
-        # Echoes the actual first sample text (lightly templated) rather than a fixed
-        # literal string - a real LLM's synthesized claim_statement embeds close to its
-        # source content, which matters for tests exercising topic assignment and
-        # claim-attach similarity (identical claim_statement text across every cluster
-        # would collapse all claims into one topic regardless of their real content).
+        # Echoes the source text so topic/claim-attach similarity tests stay meaningful.
         representative = sample_texts[0] if sample_texts else "General claim"
         return ClaimSummarySchema(
             claim_statement=f"Claim: {representative}",

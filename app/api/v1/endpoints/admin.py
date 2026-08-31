@@ -25,8 +25,7 @@ async def get_settings(db: AsyncSession = Depends(get_db)) -> AdminSettingRead:
 async def update_settings(
     payload: AdminSettingUpdate, db: AsyncSession = Depends(get_db)
 ) -> AdminSettingRead:
-    """US32 - a single global threshold governing every claim's Over/Under Threshold
-    status on the F3 watchlist (see AlertRow.threshold_status)."""
+    """The single global threshold governing every claim's Over/Under Threshold status."""
     settings = await admin_service.set_threshold(db, payload.over_threshold)
     return AdminSettingRead(over_threshold=settings.over_threshold)
 
@@ -38,8 +37,7 @@ async def generate_generic_claim(
     llm: LLMClient = Depends(get_llm_client),
     embedder: EmbeddingService = Depends(get_embedding_service),
 ) -> GenerateGenericClaimResponse:
-    """US33 - one-click sample Existing/Generic claim for demo/testing, fully scored,
-    without waiting on live detection."""
+    """One-click sample Existing/Generic claim for demo/testing, fully scored."""
     try:
         claim = await admin_service.generate_demo_existing_claim(db, llm, embedder, topic_hint)
     except LLMNotConfiguredError as exc:

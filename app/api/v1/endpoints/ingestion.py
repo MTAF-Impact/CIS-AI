@@ -44,11 +44,7 @@ async def ingest_content(
     embedder: EmbeddingService = Depends(get_embedding_service),
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> ContentItem:
-    """Ingest a single piece of content: embed it, classify it via OpenAI, persist it.
-    This is the endpoint an upstream crawler/scheduler will eventually call, so
-    clustering is kicked off automatically in the background afterward - the same
-    "no separate manual step" pattern as F2's AI matchmaking pipeline running
-    automatically after a Policy is created."""
+    """Embed, classify, persist. Auto-triggers clustering in the background afterward."""
     embedding = await run_in_threadpool(embedder.embed, payload.text)
     try:
         item = await analyze_and_build_item(payload, llm, embedding)
@@ -73,8 +69,7 @@ async def ingest_content_batch(
     embedder: EmbeddingService = Depends(get_embedding_service),
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> ContentItemBatchResult:
-    """Ingest multiple content items in one call: batch-embed, then classify
-    concurrently. See ingest_content's docstring for why clustering is auto-triggered."""
+    """Batch-embed, then classify concurrently. Auto-triggers clustering afterward."""
     texts = [entry.text for entry in payload.items]
     embeddings = await run_in_threadpool(embedder.embed_batch, texts)
 
@@ -103,8 +98,8 @@ async def ingest_content_batch(
         for item in created:
             await db.refresh(item)
         background_tasks.add_task(
-        cluster_unclustered_content_task, llm=llm, embedder=embedder, session_factory=session_factory
-    )
+            cluster_unclustered_content_task, llm=llm, embedder=embedder, session_factory=session_factory
+        )
 
     return ContentItemBatchResult(created=created, failed=failed)
 
@@ -116,11 +111,8 @@ async def generate_synthetic_ingest(
     llm: LLMClient = Depends(get_llm_client),
     embedder: EmbeddingService = Depends(get_embedding_service),
 ) -> SyntheticIngestResult:
-    """Prototype stand-in for the live crawler: since a scheduler-driven crawl isn't
-    wired up yet, this fabricates realistic Jakarta posts via the LLM and runs them
-    through the exact same embed + analyze + persist pipeline real ingested content
-    would go through. Meant to be triggered on demand (e.g. a "Generate sample data"
-    button in the FE), not a replacement for real ingestion once crawling exists."""
+    """Prototype stand-in for the live crawler - fabricates posts via the LLM and runs
+    them through the normal ingest pipeline."""
     grounding_context = await build_grounding_context(db)
     try:
         synthetic_posts = await llm.generate_synthetic_posts(

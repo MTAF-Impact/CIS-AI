@@ -71,10 +71,7 @@ async def alert_chart(
     claim_ids: list[uuid.UUID] = Query(default_factory=list),
     granularity: str = Query(default="week", pattern="^(day|week|month|year)$"),
 ) -> list[ChartSeries]:
-    """[C1]/[C2] - FinalClaimScore over time for whichever watchlist claims the FE
-    currently has checked (US28). Only claim_ids that are actually on the F3 watchlist
-    are honored - the chart-visibility selection itself is FE-local state (default
-    empty on page load, per US28), not persisted server-side."""
+    """[C1]/[C2] - FinalClaimScore over time for whichever watchlist claims are checked."""
     if not claim_ids:
         return []
 

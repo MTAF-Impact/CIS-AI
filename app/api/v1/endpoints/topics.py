@@ -17,8 +17,7 @@ async def list_topics(db: AsyncSession = Depends(get_db)) -> list[Topic]:
 
 @router.post("", response_model=TopicRead, status_code=201)
 async def create_topic(payload: TopicCreate, db: AsyncSession = Depends(get_db)) -> Topic:
-    """Manual creation, for cases outside the dynamic clustering-driven path (see
-    app.services.clustering_service.assign_or_create_topic)."""
+    """Manual creation, outside the dynamic clustering-driven path."""
     topic = Topic(name=payload.name, description=payload.description)
     db.add(topic)
     await db.commit()

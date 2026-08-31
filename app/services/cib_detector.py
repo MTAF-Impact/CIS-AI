@@ -67,9 +67,8 @@ def _pair_reasons_and_score(
 def detect_coordinated_behavior(
     posts: list[CIBCheckPost], embedder: EmbeddingService | None = None
 ) -> CIBCheckResponse:
-    """Deterministic CIB heuristic: flags pairs of posts that co-occur on burst timing,
-    near-duplicate text, and/or clustered account-creation dates, then groups flagged
-    pairs into coordinated clusters."""
+    """Deterministic CIB heuristic: flags and clusters posts on burst timing, text
+    similarity, and account-creation clustering."""
     embedder = embedder or get_embedding_service()
     n = len(posts)
 

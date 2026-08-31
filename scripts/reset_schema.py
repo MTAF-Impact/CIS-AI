@@ -1,16 +1,9 @@
-"""Drop and recreate every CIS AI Service table in the shared Supabase Postgres database.
-
-DESTRUCTIVE - drops every table that physically exists in the `public` schema and belongs
-to THIS service (not just ones the current SQLAlchemy models know about - see note below)
-and recreates the current set empty. Intended for pre-launch/demo use against a disposable
-database (this project has no migrations tool; schema is Base.metadata.create_all-driven,
-same as scripts/seed_demo_data.py's ensure_schema()). Run manually:
+"""DESTRUCTIVE - drops and recreates every table this service owns. Run manually:
 
     uv run python scripts/reset_schema.py
 
-IMPORTANT: this database is SHARED with the Go backend, which owns its own tables (the
-`cis_` prefix - cis_users, cis_policies, cis_claim_alerts, etc.). Those are explicitly
-excluded below - this script must never touch another service's tables.
+IMPORTANT: this database is shared with the Go backend (`cis_*` tables) - those are
+explicitly excluded below and must never be touched by this script.
 """
 
 import asyncio
@@ -26,8 +19,7 @@ from app.core.logging_config import configure_logging
 configure_logging(level=settings.LOG_LEVEL, json_format=False)
 logger = logging.getLogger("reset_schema")
 
-# Tables outside this prefix are owned/migrated by another service (currently just the Go
-# backend's `cis_` tables) and must never be touched by this script.
+# Owned/migrated by the Go backend - must never be touched by this script.
 FOREIGN_TABLE_PREFIXES = ("cis_",)
 
 
@@ -35,13 +27,8 @@ async def reset_schema() -> None:
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
 
-        # Drop every table that physically exists AND belongs to us, not just ones
-        # Base.metadata currently has a model for. Base.metadata.drop_all() alone
-        # silently leaves orphaned tables behind whenever a model file is deleted (e.g.
-        # Narrative/InterventionResponse being superseded by Claim in the PRD v1.1
-        # rearchitecture) - it has no way to know those tables ever existed, so this
-        # queries pg_tables directly instead. Foreign-service tables are filtered out
-        # before anything is dropped - see FOREIGN_TABLE_PREFIXES above.
+        # Query pg_tables directly rather than Base.metadata.drop_all() alone, which
+        # leaves orphaned tables behind whenever a model file is deleted.
         all_tables = [
             row[0]
             for row in (

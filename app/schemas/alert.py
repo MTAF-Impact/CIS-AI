@@ -6,9 +6,7 @@ from pydantic import BaseModel
 
 
 class ThresholdStatus(str, Enum):
-    """Derived at read time by comparing FinalClaimScore against the global admin
-    threshold (US29/US32) - never stored, so it can never go stale relative to the
-    threshold or the claim's current score."""
+    """Derived at read time against the global admin threshold - never stored."""
 
     OVER_THRESHOLD = "over_threshold"
     UNDER_THRESHOLD = "under_threshold"

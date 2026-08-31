@@ -1,23 +1,7 @@
-"""Seed the CIS AI Service with realistic Jakarta demo data for the hackathon walkthrough,
-aligned with PRD v1.1's Claim Repository Bank (F1) model.
-
-Populates:
-  - 4 real Jakarta community Fault Lines (used for RAG grounding of Debunk/Prebunk Activity)
-  - 13 realistic urban-climate-policy posts across 4 emerging EXISTING claims, grounded in
-    actual Jakarta policies (ERP road pricing, MRT Fase 2 tree removal, ITF Sunter waste
-    plant, Ciliwung flood-control budget) - Topics form dynamically from these clusters,
-    not hardcoded
-  - 2 predicted NON_EXISTING claims (D2), exercising the prediction pipeline against
-    policies not yet circulating in public discourse
-Then runs the same pipeline production traffic would trigger: embed -> classify (OpenAI)
--> persist -> cluster into EXISTING claims -> score (R/V/F/H/EI/NPR) -> cache Debunk
-Activity, plus the separate NON_EXISTING prediction flow.
-
-Note: post text is kept in English on purpose even though this is Jakarta data - the
-embedding model (sentence-transformers/all-MiniLM-L6-v2) is English-only, so English text
-with real Jakarta place/policy names gives the most reliable clustering. Swap to a
-multilingual embedding model (e.g. paraphrase-multilingual-MiniLM-L12-v2, also 384-dim) if
-Bahasa Indonesia post text is needed later.
+"""Seed realistic Jakarta demo data: 4 fault lines, 13 posts across 4 Existing claims,
+2 predicted Non-Existing claims. Runs the full production pipeline: embed -> classify ->
+persist -> cluster -> score -> cache activity. Post text is English-only to match the
+embedding model.
 
 Usage:
     uv run python scripts/seed_demo_data.py
@@ -213,9 +197,7 @@ DEMO_POSTS: list[tuple[str, ContentSource, str, str, float]] = [
     ),
 ]
 
-# (policy_title, policy_description, rolled_out_date) - registered as real F2 Policy
-# records ahead of their rollout (Not Rolled Out), exercising the D2 (Non-Existing
-# claim) prediction pipeline the same way F2's AI matchmaking (US42) would.
+# (policy_title, policy_description, rolled_out_date) - exercises the D2 prediction pipeline.
 DEMO_POLICY_PREDICTIONS: list[tuple[str, str, date]] = [
     (
         "MRT Fase 2 Bundaran HI-Kota Extension",
@@ -241,11 +223,7 @@ async def ensure_schema() -> None:
 
 
 async def clear_demo_data(session) -> None:
-    # content_items.claim_id is ON DELETE SET NULL, claim_policies/claim_alerts/
-    # claim_score_snapshots are ON DELETE CASCADE from claims, and claims.topic_id is ON
-    # DELETE RESTRICT - so claims must be cleared before topics, and content_items
-    # before claims for a clean reset either way. admin_settings is left untouched -
-    # it's a global config row, not demo content.
+    # FK-safe order. admin_settings is left untouched - not demo content.
     await session.execute(text("DELETE FROM content_items"))
     await session.execute(text("DELETE FROM claim_alerts"))
     await session.execute(text("DELETE FROM claim_score_snapshots"))

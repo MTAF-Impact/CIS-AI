@@ -30,8 +30,7 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 MAX_RATE_LIMIT_RETRIES = 3
 DEFAULT_RATE_LIMIT_RETRY_SECONDS = 15.0
 
-# These 429 error codes mean "this key cannot succeed no matter how long you wait" -
-# retrying wastes ~45s (3 retries) before failing anyway, so fail fast instead.
+# These 429 codes can't succeed no matter how long you wait - fail fast instead.
 NON_RETRYABLE_RATE_LIMIT_CODES = frozenset({"insufficient_quota", "credit_balance_exhausted"})
 _RETRY_DELAY_PATTERN = re.compile(r"retry in ([\d.]+)s", re.IGNORECASE)
 
@@ -274,13 +273,8 @@ a wrong one polluting the policy's claim list.
 
 
 class LLMClient:
-    """Thin async wrapper around the OpenAI SDK (Responses API) with strict structured
-    JSON output via Pydantic `text_format` schemas.
-
-    Client construction is lazy and never raises: a missing/invalid OPENAI_API_KEY only
-    surfaces when a generation call is actually made, so the rest of the app (and demo
-    seeding) can still start up and exercise non-LLM code paths without a key configured.
-    """
+    """Async OpenAI Responses API wrapper with strict structured JSON output. Client
+    construction is lazy - a missing key only raises on the first real call."""
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self._model = model or settings.OPENAI_MODEL
@@ -308,8 +302,7 @@ class LLMClient:
 
         for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
             try:
-                # Note: temperature is intentionally omitted - reasoning-tier models like
-                # gpt-5.6-luna reject it (400 Unsupported parameter).
+                # temperature omitted - reasoning-tier models reject it.
                 response = await client.responses.parse(
                     model=self._model,
                     instructions=system_instruction,
@@ -353,8 +346,7 @@ class LLMClient:
         )
 
     async def classify_stance(self, claim_statement: str, post_text: str) -> Stance:
-        """Classify a single post's stance toward an already-known claim (used when a
-        post attaches to an EXISTING claim - see clustering_service Pass 1)."""
+        """Classify a single post's stance toward an already-known claim."""
         prompt = f"Claim statement:\n{claim_statement}\n\nPost:\n{post_text}"
         result = await self._generate_structured(
             prompt=prompt,
@@ -366,10 +358,8 @@ class LLMClient:
     async def classify_stances_batch(
         self, claim_statement: str, texts: list[str]
     ) -> list[Stance]:
-        """Classify stance for every post in a newly-formed cluster in one call (bounds
-        LLM-call growth vs. one call per post - mirrors embed_batch's batching intent).
-        Raises StanceCountMismatchError if the model returns a different count than
-        given - the caller must not silently zip a misaligned result."""
+        """Batch stance classification for a new cluster. Raises StanceCountMismatchError
+        on a count mismatch."""
         numbered = "\n".join(f"{i + 1}. {text}" for i, text in enumerate(texts))
         prompt = f"Claim statement:\n{claim_statement}\n\nPosts:\n{numbered}"
         result = await self._generate_structured(
@@ -386,8 +376,7 @@ class LLMClient:
     async def classify_harm(
         self, claim_statement: str, sample_supporting_texts: list[str]
     ) -> HarmClassificationSchema:
-        """AI-classify Harm Severity (H) sub-components. harm_human_confirmed stays
-        False on the Claim until a human reviewer confirms via PATCH /claims/{id}/harm/confirm."""
+        """AI-classify the 4 Harm Severity sub-components."""
         joined = "\n---\n".join(sample_supporting_texts[:10])
         prompt = f"Claim statement:\n{claim_statement}\n\nSample supporting posts:\n{joined}"
         return await self._generate_structured(
@@ -399,8 +388,7 @@ class LLMClient:
     async def generate_debunk(
         self, claim_statement: str, grounding_context: str
     ) -> DebunkContentSchema:
-        """Draft the structured Truth Sandwich content for an EXISTING claim's Debunk
-        Activity, grounded strictly in the provided context."""
+        """Draft the structured Truth Sandwich for an Existing claim's Debunk Activity."""
         prompt = (
             f"Claim being debunked (for context only - do not quote verbatim in the flag):\n"
             f"{claim_statement}\n\n"
@@ -415,8 +403,7 @@ class LLMClient:
     async def predict_non_existing_claim(
         self, policy_title: str, policy_description: str, grounding_context: str
     ) -> NonExistingClaimPredictionSchema:
-        """Predict a NON_EXISTING claim ahead of a policy announcement: the predicted
-        claim statement, topic, and Prebunk Activity content."""
+        """Predict a Non-Existing claim ahead of a policy announcement."""
         prompt = (
             f"Policy title: {policy_title}\n"
             f"Policy description:\n{policy_description}\n\n"
@@ -431,9 +418,7 @@ class LLMClient:
     async def generate_synthetic_posts(
         self, count: int, topic_hint: str | None, grounding_context: str
     ) -> list[SyntheticPostSchema]:
-        """Fabricate `count` realistic 'crawled' posts to stand in for a not-yet-wired-up
-        live crawler (prototype/demo use only). Callers still run each result through the
-        normal ingest pipeline (embed + analyze_content) - only the raw post is synthetic."""
+        """Fabricate `count` realistic posts, standing in for a not-yet-wired-up live crawler."""
         prompt = (
             f"Number of posts to generate: {count}\n"
             f"Topic focus (optional steer, blank = your judgement across realistic "
@@ -451,9 +436,8 @@ class LLMClient:
     async def confirm_policy_claim_matches(
         self, policy_title: str, policy_description: str, candidate_claim_statements: list[str]
     ) -> list[bool]:
-        """F2 AI matchmaking (US42a): confirms which candidate Existing claims are
-        genuinely about `policy_title`. Raises ValueError if the result can't be zipped
-        1:1 with candidate_claim_statements - the caller must not silently misalign."""
+        """Confirms which candidate claims are genuinely about `policy_title`. Raises
+        ValueError on a count mismatch."""
         numbered = "\n".join(
             f"{i + 1}. {statement}" for i, statement in enumerate(candidate_claim_statements)
         )
