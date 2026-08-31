@@ -18,7 +18,7 @@ from app.models.enums import ClaimType
 from app.models.policy import ClaimPolicy, Policy
 from app.services import backend_callback_service
 from app.services.claim_prediction_service import predict_non_existing_claim
-from app.services.document_extraction import UnsupportedDocumentTypeError, extract_text
+from app.services.document_extraction import extract_text
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.llm_client import LLMClient, get_llm_client
 
@@ -128,9 +128,18 @@ async def match_and_predict_claims_for_policy(
 async def _fetch_and_extract(
     file_name: str | None, file_mime_type: str | None, document_url: str | None
 ) -> tuple[str | None, bytes | None]:
-    """Best-effort: any fetch/extract failure falls back to (None, None)."""
+    """Best-effort: a fetch failure loses both (nothing downloaded to keep); an
+    extraction failure keeps the downloaded file bytes and only drops the text -
+    the document still downloaded fine, so there's no reason to discard it too.
+    The extraction except is deliberately broad (not just UnsupportedDocumentTypeError):
+    pypdf can raise other errors for a real-world PDF - e.g. DependencyError when an
+    AES-encrypted PDF needs the `cryptography` package this run doesn't have - and
+    letting any of those propagate crashes the whole Flow 1 job before a Policy row
+    is even created, which looks indistinguishable from the request never arriving
+    at all (no row, no error, no callback)."""
     if not document_url:
         return None, None
+
     try:
         async with httpx.AsyncClient(
             timeout=DOCUMENT_FETCH_TIMEOUT_SECONDS, follow_redirects=True
@@ -138,15 +147,25 @@ async def _fetch_and_extract(
             response = await client.get(document_url)
             response.raise_for_status()
             data = response.content
-        return extract_text(file_name or "", file_mime_type, data), data
-    except (httpx.HTTPError, UnsupportedDocumentTypeError):
+    except httpx.HTTPError:
         logger.warning(
-            "Could not fetch/extract policy document (file_name=%r) - proceeding with "
-            "the name alone",
+            "Could not fetch policy document (file_name=%r) - proceeding with the "
+            "name alone",
             file_name,
             exc_info=True,
         )
         return None, None
+
+    try:
+        return extract_text(file_name or "", file_mime_type, data), data
+    except Exception:
+        logger.warning(
+            "Could not extract text from policy document (file_name=%r) - keeping "
+            "the file, proceeding without extracted text",
+            file_name,
+            exc_info=True,
+        )
+        return None, data
 
 
 async def run_matchmaking_webhook(
