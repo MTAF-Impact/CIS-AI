@@ -1,0 +1,545 @@
+"""Claim clustering pipeline - Pass 1 (attach unclustered ContentItems to existing
+EXISTING claims) then Pass 2 (HDBSCAN the remainder into new EXISTING claims), followed
+by dynamic Topic assignment, stance classification, and the full R/V/F/H/EI/NPR scoring
+pass for every claim touched. See the PRD rearchitecture plan (sections 1-3) for the
+full design rationale.
+"""
+
+import logging
+import statistics
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+
+import hdbscan
+import numpy as np
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.core.database import get_session_factory
+from app.models.alert import ClaimScoreSnapshot
+from app.models.claim import Claim
+from app.models.content import ContentItem
+from app.models.enums import ClaimStatus, ClaimType, Stance
+from app.models.topic import Topic
+from app.models.topic_volume_bucket import TopicVolumeBucket
+from app.services import falseness_service, scoring_engine
+from app.services.activity_service import generate_and_cache_debunk_activity
+from app.services.embedding_service import EmbeddingService, get_embedding_service
+from app.services.llm_client import LLMClient, get_llm_client
+
+logger = logging.getLogger(__name__)
+
+MIN_CLUSTER_SIZE = 2
+MAX_SAMPLE_TEXTS_FOR_SUMMARY = 10
+CLAIM_ATTACH_THRESHOLD = 0.55
+
+
+@dataclass
+class ClusterResult:
+    claims_created: int
+    claims_updated: int
+    content_items_clustered: int
+
+
+def _centroid(vectors: list[list[float]]) -> np.ndarray:
+    array = np.array(vectors, dtype=float)
+    centroid = array.mean(axis=0)
+    norm = np.linalg.norm(centroid)
+    return centroid / norm if norm > 0 else centroid
+
+
+async def assign_or_create_topic(
+    db: AsyncSession, claim_embedding: list[float], candidate_label: str
+) -> Topic:
+    """Dynamic, embedding-centroid based topic assignment - mirrors the ContentItem->Claim
+    attach-or-create pattern one level up (per the user's explicit choice of dynamic
+    topics over a fixed taxonomy). Used identically by both EXISTING claim creation
+    (Pass 2 below) and NON_EXISTING claim prediction (app.services.claim_prediction_service)."""
+    existing_topics = list(
+        (await db.execute(select(Topic).where(Topic.embedding.is_not(None)))).scalars().all()
+    )
+    claim_vec = np.asarray(claim_embedding)
+
+    best_topic, best_score = None, -1.0
+    for topic in existing_topics:
+        score = float(np.dot(claim_vec, np.asarray(topic.embedding)))
+        if score > best_score:
+            best_topic, best_score = topic, score
+
+    if best_topic is not None and best_score >= scoring_engine.TOPIC_ATTACH_THRESHOLD:
+        sibling_embeddings = list(
+            (
+                await db.execute(
+                    select(Claim.embedding).where(
+                        Claim.topic_id == best_topic.id, Claim.embedding.is_not(None)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        best_topic.embedding = _centroid([*sibling_embeddings, claim_embedding]).tolist()
+        return best_topic
+
+    new_topic = Topic(name=candidate_label, embedding=claim_embedding)
+    db.add(new_topic)
+    await db.flush()
+    return new_topic
+
+
+async def _increment_topic_volume_bucket(
+    db: AsyncSession, topic_id: uuid.UUID, when: datetime
+) -> None:
+    bucket_start = when.replace(minute=0, second=0, microsecond=0)
+    stmt = select(TopicVolumeBucket).where(
+        TopicVolumeBucket.topic_id == topic_id, TopicVolumeBucket.bucket_start == bucket_start
+    )
+    bucket = (await db.execute(stmt)).scalar_one_or_none()
+    if bucket is None:
+        bucket = TopicVolumeBucket(topic_id=topic_id, bucket_start=bucket_start, supporting_volume=0)
+        db.add(bucket)
+        await db.flush()
+    bucket.supporting_volume += 1
+
+
+async def _reach_inputs(db: AsyncSession, claim_id: uuid.UUID) -> tuple[int, int, int, int]:
+    stmt = select(
+        func.coalesce(func.sum(ContentItem.impressions), 0),
+        func.count(func.distinct(ContentItem.author_id)),
+        func.count(ContentItem.id),
+        func.count(func.distinct(ContentItem.source)),
+    ).where(ContentItem.claim_id == claim_id, ContentItem.stance == Stance.SUPPORTING)
+    impressions, unique_authors, content_count, distinct_platforms = (await db.execute(stmt)).one()
+    return impressions, unique_authors, content_count, distinct_platforms
+
+
+async def renormalize_topic_reach(db: AsyncSession, topic_id: uuid.UUID) -> list[Claim]:
+    """Min-max normalizes raw Reach across every EXISTING claim in a topic (scoped
+    per-topic - see scoring_engine.normalize_minmax_per_topic). Returns the full claim
+    list so the caller can also rescore them (a reach change makes their cached
+    claim_score/final_claim_score stale even if nothing else about them changed)."""
+    claims = list(
+        (
+            await db.execute(
+                select(Claim).where(Claim.topic_id == topic_id, Claim.claim_type == ClaimType.EXISTING)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not claims:
+        return []
+
+    raw_values = {}
+    for claim in claims:
+        impressions, unique_authors, content_count, distinct_platforms = await _reach_inputs(
+            db, claim.id
+        )
+        raw_values[claim.id] = scoring_engine.raw_reach(
+            impressions, unique_authors, content_count, distinct_platforms
+        )
+
+    normalized = scoring_engine.normalize_minmax_per_topic(raw_values)
+    for claim in claims:
+        claim.reach_score = normalized[claim.id]
+    return claims
+
+
+async def _claim_volume_windows(
+    db: AsyncSession, claim_id: uuid.UUID, window_hours: float
+) -> tuple[int, int]:
+    now = datetime.now(UTC)
+    window_start = now - timedelta(hours=window_hours)
+    prev_window_start = now - timedelta(hours=2 * window_hours)
+
+    volume_t = (
+        await db.execute(
+            select(func.count())
+            .select_from(ContentItem)
+            .where(
+                ContentItem.claim_id == claim_id,
+                ContentItem.stance == Stance.SUPPORTING,
+                ContentItem.created_at >= window_start,
+            )
+        )
+    ).scalar_one()
+    volume_prev = (
+        await db.execute(
+            select(func.count())
+            .select_from(ContentItem)
+            .where(
+                ContentItem.claim_id == claim_id,
+                ContentItem.stance == Stance.SUPPORTING,
+                ContentItem.created_at >= prev_window_start,
+                ContentItem.created_at < window_start,
+            )
+        )
+    ).scalar_one()
+    return volume_t, volume_prev
+
+
+async def _topic_velocity_baseline(db: AsyncSession, topic_id: uuid.UUID) -> tuple[float, float]:
+    """Baseline growth-rate distribution for Velocity's z-score, derived from
+    bucket-over-bucket volume deltas in TopicVolumeBucket history. Cold-start (fewer
+    than 3 buckets) returns (0, 0), which velocity_zscore treats as "no baseline yet"
+    and neutrally squashes to 50."""
+    rows = (
+        await db.execute(
+            select(TopicVolumeBucket.supporting_volume)
+            .where(TopicVolumeBucket.topic_id == topic_id)
+            .order_by(TopicVolumeBucket.bucket_start)
+        )
+    ).scalars().all()
+    if len(rows) < 3:
+        return 0.0, 0.0
+
+    deltas = [scoring_engine.raw_velocity(rows[i], rows[i - 1]) for i in range(1, len(rows))]
+    mean = statistics.mean(deltas)
+    std = statistics.pstdev(deltas) if len(deltas) > 1 else 0.0
+    return mean, std
+
+
+async def _npr_volumes(
+    db: AsyncSession, claim_id: uuid.UUID, window_hours: float
+) -> tuple[int, int]:
+    window_start = datetime.now(UTC) - timedelta(hours=window_hours)
+    rows = (
+        await db.execute(
+            select(ContentItem.stance, func.count())
+            .where(
+                ContentItem.claim_id == claim_id,
+                ContentItem.created_at >= window_start,
+                ContentItem.stance.in_([Stance.SUPPORTING, Stance.OPPOSING]),
+            )
+            .group_by(ContentItem.stance)
+        )
+    ).all()
+    counts = dict(rows)
+    return counts.get(Stance.SUPPORTING, 0), counts.get(Stance.OPPOSING, 0)
+
+
+async def _emotional_intensity_inputs(
+    db: AsyncSession, claim_id: uuid.UUID, stance: Stance
+) -> tuple[float, float] | None:
+    """Returns (avg_outrage, negative_reaction_ratio) for the given stance's content, or
+    None if there's no content with that stance yet (distinguishes "genuinely zero
+    intensity" from "nothing to measure" - matters for emotional_intensity_opposing,
+    which should stay unset until Opposing content actually exists)."""
+    row = (
+        await db.execute(
+            select(
+                func.avg(ContentItem.outrage_score),
+                func.coalesce(func.sum(ContentItem.negative_reaction_count), 0),
+                func.coalesce(func.sum(ContentItem.positive_reaction_count), 0),
+                func.count(ContentItem.id),
+            ).where(ContentItem.claim_id == claim_id, ContentItem.stance == stance)
+        )
+    ).one()
+    if row[3] == 0:
+        return None
+
+    avg_outrage = float(row[0]) if row[0] is not None else 0.0
+    negative_sum, positive_sum = row[1], row[2]
+    total_reactions = negative_sum + positive_sum
+    negative_ratio = (negative_sum / total_reactions) if total_reactions > 0 else 0.0
+    return avg_outrage, negative_ratio
+
+
+async def rescore_claim(db: AsyncSession, claim: Claim) -> None:
+    """Recomputes everything EXCEPT Reach (handled separately per-topic by
+    renormalize_topic_reach, which must run first) and Harm (classified once at claim
+    creation - see the Pass 2 harm block below; it doesn't drift with new supporting
+    volume the way Velocity/NPR do)."""
+    supporting_vol, opposing_vol = await _npr_volumes(db, claim.id, scoring_engine.ROLLING_WINDOW_HOURS)
+    npr, is_dormant = scoring_engine.compute_npr(supporting_vol, opposing_vol)
+    discount = scoring_engine.discount_factor(npr, supporting_vol + opposing_vol)
+
+    volume_t, volume_prev = await _claim_volume_windows(
+        db, claim.id, scoring_engine.ROLLING_WINDOW_HOURS
+    )
+    raw_v = scoring_engine.raw_velocity(volume_t, volume_prev)
+    baseline_mean, baseline_std = await _topic_velocity_baseline(db, claim.topic_id)
+    velocity = scoring_engine.velocity_zscore(raw_v, baseline_mean, baseline_std)
+
+    falseness = (
+        await falseness_service.compute_falseness_score(db, claim.embedding)
+        if claim.embedding is not None
+        else None
+    )
+
+    supporting_ei_inputs = await _emotional_intensity_inputs(db, claim.id, Stance.SUPPORTING)
+    ei = scoring_engine.emotional_intensity(*supporting_ei_inputs) if supporting_ei_inputs else 0.0
+
+    # Display-only diagnostic (PRD Section 5.4.6) - computed the same way as EI but on
+    # Opposing-side content, and NEVER fed into claim_score/discount/final below.
+    opposing_ei_inputs = await _emotional_intensity_inputs(db, claim.id, Stance.OPPOSING)
+    ei_opposing = (
+        scoring_engine.emotional_intensity(*opposing_ei_inputs) if opposing_ei_inputs else None
+    )
+
+    harm = claim.harm_score if claim.harm_score is not None else 0.0
+    score = scoring_engine.claim_score(claim.reach_score or 0.0, velocity, falseness, harm, ei)
+    final = scoring_engine.final_claim_score(score, discount)
+
+    claim.velocity_score = velocity
+    claim.falseness_score = falseness
+    claim.emotional_intensity_score = ei
+    claim.emotional_intensity_opposing = ei_opposing
+    claim.npr = npr
+    claim.discount_factor = discount
+    claim.is_dormant = is_dormant
+    claim.claim_score = score
+    claim.final_claim_score = final
+
+    # Powers the F3 trend chart [C1] - Claim only ever holds the current score, so this
+    # is the only history of how FinalClaimScore moved over time.
+    db.add(ClaimScoreSnapshot(claim_id=claim.id, final_claim_score=final))
+
+
+async def rescore_all_existing_claims(db: AsyncSession) -> int:
+    """Standalone rescore, independent of clustering - NPR/Velocity can drift purely
+    from wall-clock time (old opposing posts aging out of the rolling window) even with
+    zero new content, so this can't only run reactively during clustering. Powers
+    POST /claims/rescore."""
+    topics = list((await db.execute(select(Topic.id))).scalars().all())
+    rescored = 0
+    for topic_id in topics:
+        claims = await renormalize_topic_reach(db, topic_id)
+        for claim in claims:
+            await rescore_claim(db, claim)
+            rescored += 1
+    await db.commit()
+    return rescored
+
+
+async def build_claim_from_content_items(
+    db: AsyncSession,
+    cluster_items: list[ContentItem],
+    llm: LLMClient,
+    embedder: EmbeddingService,
+) -> Claim:
+    """Creates one new EXISTING claim from a set of already-persisted, not-yet-clustered
+    ContentItems: summarizes the claim statement, assigns a dynamic Topic, classifies
+    every item's stance, classifies Harm once, and eagerly caches the Debunk Activity.
+
+    Shared by cluster_unclustered_content's Pass 2 (HDBSCAN-formed clusters) and
+    app.services.admin_service's "Generate Generic Claim" demo utility (US33), which
+    hands it a deterministic, LLM-fabricated cluster instead of an HDBSCAN one - the
+    claim-construction logic itself is identical either way."""
+    sample_texts = [item.text for item in cluster_items[:MAX_SAMPLE_TEXTS_FOR_SUMMARY]]
+    try:
+        summary = await llm.summarize_claim(sample_texts)
+        claim_statement, topic_label = summary.claim_statement, summary.topic_label
+    except Exception:
+        logger.exception("LLM claim summarization failed; using fallback statement")
+        claim_statement = sample_texts[0][:500]
+        topic_label = "General"
+
+    claim_embedding = embedder.embed(claim_statement)
+    topic = await assign_or_create_topic(db, claim_embedding, topic_label)
+
+    claim = Claim(
+        claim_type=ClaimType.EXISTING,
+        claim_statement=claim_statement,
+        topic_id=topic.id,
+        status=ClaimStatus.UNREVIEWED,
+        embedding=claim_embedding,
+        first_caught_at=min(item.created_at for item in cluster_items),
+    )
+    db.add(claim)
+    await db.flush()
+
+    try:
+        stances = await llm.classify_stances_batch(
+            claim_statement, [item.text for item in cluster_items]
+        )
+    except Exception:
+        logger.exception("Batch stance classification failed; falling back per-item")
+        stances = [
+            await llm.classify_stance(claim_statement, item.text) for item in cluster_items
+        ]
+
+    for item, stance in zip(cluster_items, stances, strict=True):
+        item.claim_id = claim.id
+        item.stance = stance
+        if stance == Stance.SUPPORTING:
+            await _increment_topic_volume_bucket(db, topic.id, item.created_at)
+
+    supporting_texts = [
+        item.text
+        for item, stance in zip(cluster_items, stances, strict=True)
+        if stance == Stance.SUPPORTING
+    ] or sample_texts
+    try:
+        harm = await llm.classify_harm(claim_statement, supporting_texts[:10])
+    except Exception:
+        logger.exception("Harm classification failed; leaving harm fields unset")
+    else:
+        claim.harm_public_safety = harm.public_safety
+        claim.harm_institutional_trust = harm.institutional_trust
+        claim.harm_economic = harm.economic
+        claim.harm_policy_disruption = harm.policy_disruption
+        claim.harm_score = scoring_engine.harm_score(
+            harm.public_safety,
+            harm.institutional_trust,
+            harm.economic,
+            harm.policy_disruption,
+        )
+
+    await generate_and_cache_debunk_activity(db, claim, llm, embedder)
+    return claim
+
+
+async def cluster_unclustered_content(
+    db: AsyncSession,
+    llm: LLMClient | None = None,
+    embedder: EmbeddingService | None = None,
+) -> ClusterResult:
+    """Cluster all not-yet-clustered ContentItems into Claims.
+
+    1. Attach unclustered items to an existing EXISTING claim if they are close enough
+       to its claim_statement embedding (keeps claims dynamic/growing rather than
+       fragmenting), classifying each attached item's stance via an explicit LLM call
+       (never defaulted - a centroid-proximity match can be a rebuttal just as easily
+       as agreement).
+    2. Cluster whatever remains with HDBSCAN and create new EXISTING claims for each
+       cluster (label -1 = noise is left unclustered), assigning a dynamic Topic,
+       batch-classifying stance, classifying Harm once, and eagerly generating the
+       cached Debunk Activity.
+    3. Renormalize Reach per touched topic, then run the full R/V/F/H/EI/NPR scoring
+       pass for every claim in a touched topic (not just directly-touched claims - a
+       sibling's Reach renormalization makes their cached score stale too).
+    """
+    llm = llm or get_llm_client()
+    embedder = embedder or get_embedding_service()
+
+    unclustered_items = list(
+        (
+            await db.execute(
+                select(ContentItem).where(
+                    ContentItem.claim_id.is_(None), ContentItem.embedding.is_not(None)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not unclustered_items:
+        return ClusterResult(0, 0, 0)
+
+    touched_topic_ids: set[uuid.UUID] = set()
+
+    # --- Pass 1: attach to existing claims ---
+    existing_claims = list(
+        (
+            await db.execute(
+                select(Claim).where(
+                    Claim.claim_type == ClaimType.EXISTING, Claim.embedding.is_not(None)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    claim_vecs = {c.id: np.asarray(c.embedding) for c in existing_claims}
+    claims_by_id = {c.id: c for c in existing_claims}
+
+    still_unclustered: list[ContentItem] = []
+    for item in unclustered_items:
+        item_vec = np.asarray(item.embedding)
+        best_id, best_score = None, -1.0
+        for claim_id, vec in claim_vecs.items():
+            score = float(np.dot(item_vec, vec))
+            if score > best_score:
+                best_id, best_score = claim_id, score
+
+        attached = False
+        if best_id is not None and best_score >= CLAIM_ATTACH_THRESHOLD:
+            claim = claims_by_id[best_id]
+            try:
+                stance = await llm.classify_stance(claim.claim_statement, item.text)
+            except Exception:
+                logger.exception("Stance classification failed; leaving item unclustered")
+            else:
+                item.claim_id = claim.id
+                item.stance = stance
+                touched_topic_ids.add(claim.topic_id)
+                if stance == Stance.SUPPORTING:
+                    await _increment_topic_volume_bucket(db, claim.topic_id, item.created_at)
+                attached = True
+
+        if not attached:
+            still_unclustered.append(item)
+
+    # --- Pass 2: cluster the remainder into brand-new claims ---
+    claims_created = 0
+
+    if len(still_unclustered) >= MIN_CLUSTER_SIZE:
+        embeddings = np.array([item.embedding for item in still_unclustered], dtype=float)
+        labels = hdbscan.HDBSCAN(min_cluster_size=MIN_CLUSTER_SIZE, min_samples=1).fit_predict(
+            embeddings
+        )
+
+        for label in sorted(set(labels)):
+            if label == -1:
+                continue
+            cluster_items = [
+                item for item, item_label in zip(still_unclustered, labels) if item_label == label
+            ]
+            if len(cluster_items) < MIN_CLUSTER_SIZE:
+                continue
+
+            claim = await build_claim_from_content_items(db, cluster_items, llm, embedder)
+            touched_topic_ids.add(claim.topic_id)
+            claims_created += 1
+
+    if not touched_topic_ids:
+        await db.commit()
+        return ClusterResult(0, 0, 0)
+
+    # --- Renormalize Reach per touched topic, then rescore every claim in it ---
+    claims_to_rescore: dict[uuid.UUID, Claim] = {}
+    for topic_id in touched_topic_ids:
+        for claim in await renormalize_topic_reach(db, topic_id):
+            claims_to_rescore[claim.id] = claim
+
+    for claim in claims_to_rescore.values():
+        await rescore_claim(db, claim)
+
+    await db.commit()
+
+    total_clustered = sum(1 for item in unclustered_items if item.claim_id is not None)
+    return ClusterResult(
+        claims_created=claims_created,
+        claims_updated=len(claims_to_rescore) - claims_created,
+        content_items_clustered=total_clustered,
+    )
+
+
+async def cluster_unclustered_content_task(
+    llm: LLMClient | None = None,
+    embedder: EmbeddingService | None = None,
+    session_factory: async_sessionmaker | None = None,
+) -> None:
+    """Fire-and-forget wrapper for FastAPI BackgroundTasks - see app.api.v1.endpoints.
+    ingestion. Ingestion (POST /ingest, /ingest/batch) is meant to be hit repeatedly by
+    an upstream crawler/scheduler, so clustering must run automatically as a side effect
+    of ingesting content, the same way F2's AI matchmaking pipeline runs automatically
+    after a Policy is created - never a separate manual step. Opens its own AsyncSession
+    since the request that triggered this has already returned and its request-scoped
+    session is closed by the time this runs (same reasoning as
+    policy_matchmaking_service.match_and_predict_claims_for_policy)."""
+    session_factory = session_factory or get_session_factory()
+    async with session_factory() as db:
+        try:
+            result = await cluster_unclustered_content(db, llm=llm, embedder=embedder)
+            logger.info(
+                "Background clustering complete: %d claims created, %d updated, "
+                "%d items clustered",
+                result.claims_created,
+                result.claims_updated,
+                result.content_items_clustered,
+            )
+        except Exception:
+            logger.exception("Background clustering pass failed")
