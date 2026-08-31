@@ -1,5 +1,10 @@
 # CIS AI Service
 
+> **Full documentation:** this README is a quick-start. For the exhaustive reference
+> (every endpoint field-by-field, every table column-by-column, the Go backend
+> integration contract, the scoring formulas, module-by-module internals) see
+> [`docs/`](./docs/README.md).
+
 Backend for **CIS (Climate Immune System)** (PRD v1.3, F1-F4): detects and scores
 climate-misinformation **Claims** circulating in public discourse (Existing/Generic claims),
 predicts claims that might emerge ahead of a policy announcement (Non-Existing/Synthetic
@@ -54,6 +59,9 @@ capability from the earlier design, ahead of F5's own future spec.
 > Both `AI_SERVICE_API_KEY` (inbound, checked by `app/core/security.py`) and
 > `INTERNAL_API_KEY` (outbound, sent as `X-Internal-Key`) are optional shared secrets -
 > unset by default, matching the current private-network-only deployment.
+>
+> Full contract detail (retry/idempotency semantics, error handling, exact code
+> locations): [`docs/GO_INTEGRATION.md`](./docs/GO_INTEGRATION.md).
 
 - **Framework:** FastAPI + Uvicorn, Pydantic v2
 - **DB/ORM:** SQLAlchemy 2.0 (async, `asyncpg`) against Supabase Postgres with `pgvector`
@@ -171,27 +179,37 @@ fields Cloud Logging parses natively) and the Dockerfile is a standard multi-sta
 
 ```
 app/
-├── api/v1/endpoints/   # ingestion, claims, topics, policies, coordination, health
-├── core/               # config (Pydantic Settings), async SQLAlchemy engine/session
-├── models/             # ContentItem, Claim, Topic, Policy, OfficialSource, FaultLine (+ enums)
+├── api/v1/endpoints/   # ingestion, claims, topics, policies, alerts, admin, coordination,
+│                       #   matchmaking (Go webhook), health
+├── core/               # config (Pydantic Settings), async SQLAlchemy engine/session,
+│                       #   structured logging, Go-webhook auth
+├── models/             # Claim, ContentItem, Topic, Policy, ClaimAlert, AdminSetting,
+│                       #   OfficialSource, FaultLine, TopicVolumeBucket (+ enums)
 ├── schemas/            # Pydantic request/response + LLM structured-output contracts
 └── services/
-    ├── llm_client.py             # OpenAI Responses API wrapper, strict JSON schema output
-    ├── embedding_service.py      # sentence-transformers MiniLM, 384-dim
-    ├── clustering_service.py     # HDBSCAN clustering, dynamic topic assignment, stance,
-    │                             #   R/V/F/H/EI/NPR scoring orchestration
-    ├── scoring_engine.py         # pure Claim Scoring System math (PRD Section 5)
-    ├── falseness_service.py      # pgvector similarity match against OfficialSource corpus
-    ├── claim_prediction_service.py  # Non-Existing claim prediction (D2)
-    ├── claim_service.py          # claim-type/status business rule
-    ├── activity_service.py       # Debunk/Prebunk Activity generation + caching
-    ├── cib_detector.py           # deterministic coordinated-inauthentic-behavior heuristic
-    └── rag_service.py            # pgvector similarity search over fault lines (grounding)
+    ├── llm_client.py                 # OpenAI Responses API wrapper, every system prompt,
+    │                                 #   strict JSON schema output, rate-limit retry
+    ├── embedding_service.py          # sentence-transformers MiniLM, 384-dim
+    ├── clustering_service.py         # HDBSCAN clustering, dynamic topic assignment, stance,
+    │                                 #   R/V/F/H/EI/NPR scoring orchestration
+    ├── scoring_engine.py             # pure Claim Scoring System math (PRD Section 6)
+    ├── falseness_service.py          # pgvector similarity match against OfficialSource corpus
+    ├── claim_prediction_service.py   # Non-Existing claim prediction (D2)
+    ├── policy_matchmaking_service.py # F2 AI matchmaking + Go Flow 1 webhook handler
+    ├── backend_callback_service.py   # outbound Flow 2 callback to the Go backend
+    ├── activity_service.py           # Debunk/Prebunk Activity generation + caching
+    ├── cib_detector.py               # deterministic coordinated-inauthentic-behavior heuristic
+    └── rag_service.py                # pgvector similarity search over fault lines (grounding)
 ```
 
-### Claim Scoring System (`app/services/scoring_engine.py`, PRD Section 5)
+For the function-by-function walkthrough of every file above, see
+[`docs/MODULES.md`](./docs/MODULES.md).
 
-Existing claims only - Non-Existing claims are never scored.
+### Claim Scoring System (`app/services/scoring_engine.py`, PRD Section 6)
+
+Full reference with every formula, weight, and edge case:
+[`docs/SCORING.md`](./docs/SCORING.md). Existing claims only - Non-Existing claims are
+never scored.
 
 ```
 ClaimScore = 0.15*R + 0.15*V + 0.30*F + 0.30*H + 0.10*EI
@@ -220,6 +238,10 @@ flagged pairs into coordinated clusters via union-find. Groundwork for the PRD's
 (Coordinated-Network Detector) dashboard, which is explicitly deferred to a future iteration.
 
 ## API reference
+
+Quick curl examples below. For the full field-by-field contract (every request/response
+field, every status code, every error case), see
+[`docs/API_REFERENCE.md`](./docs/API_REFERENCE.md).
 
 Base URL: `http://localhost:8000/api/v1`
 
