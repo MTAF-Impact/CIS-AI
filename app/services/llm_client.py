@@ -72,6 +72,10 @@ Guidance:
 - underlying_grievance: the deeper community concern or grievance this content taps into \
   (e.g. distrust of local government, cost-of-living anxiety, historical displacement), \
   in one short phrase.
+- text_en: an English translation of the content. If it is already in English, echo it \
+  back unchanged. Translate meaning faithfully, including tone (keep sarcasm sarcastic, \
+  keep outrage outraged) - this text is used for downstream embedding/clustering, not \
+  shown to end users, so prioritize semantic fidelity over polish.
 """
 
 CLAIM_SUMMARY_SYSTEM_PROMPT = """\

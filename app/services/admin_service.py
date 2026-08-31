@@ -51,8 +51,7 @@ async def generate_demo_existing_claim(
         entry = ContentItemCreate(
             text=post.text, source=post.source, author_id=post.author_id, location=post.location
         )
-        embedding = embedder.embed(post.text)
-        items.append(await analyze_and_build_item(entry, llm, embedding))
+        items.append(await analyze_and_build_item(entry, llm, embedder))
     db.add_all(items)
     await db.flush()
 

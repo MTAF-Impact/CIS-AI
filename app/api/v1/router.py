@@ -5,6 +5,7 @@ from app.api.v1.endpoints import (
     alerts,
     claims,
     coordination,
+    fault_lines,
     health,
     ingestion,
     matchmaking,
@@ -23,3 +24,4 @@ api_router.include_router(alerts.router)
 api_router.include_router(admin.router)
 api_router.include_router(coordination.router)
 api_router.include_router(matchmaking.router)
+api_router.include_router(fault_lines.router)

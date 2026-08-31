@@ -39,6 +39,7 @@ class FakeLLMClient:
             moral_foundation=MoralFoundation.FAIRNESS,
             extracted_claim=text[:200],
             underlying_grievance="fake grievance for testing",
+            text_en=text,
         )
 
     async def summarize_claim(self, sample_texts: list[str]) -> ClaimSummarySchema:

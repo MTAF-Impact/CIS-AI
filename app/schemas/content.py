@@ -15,6 +15,8 @@ class ContentItemCreate(BaseModel):
     impressions: int | None = None
     positive_reaction_count: int | None = None
     negative_reaction_count: int | None = None
+    # Dedup key for automated sources (crawler) - see ContentItem.external_ref.
+    external_ref: str | None = Field(default=None, max_length=512)
 
 
 class ContentItemBatchCreate(BaseModel):
@@ -26,6 +28,7 @@ class ContentItemRead(BaseModel):
 
     id: uuid.UUID
     text: str
+    text_en: str | None
     source: ContentSource
     author_id: str | None
     location: str | None
@@ -37,6 +40,7 @@ class ContentItemRead(BaseModel):
     impressions: int | None
     positive_reaction_count: int | None
     negative_reaction_count: int | None
+    external_ref: str | None
     claim_id: uuid.UUID | None
     created_at: datetime
 
@@ -44,6 +48,8 @@ class ContentItemRead(BaseModel):
 class ContentItemBatchResult(BaseModel):
     created: list[ContentItemRead]
     failed: list[dict] = Field(default_factory=list)
+    # external_refs already present in content_items - skipped before spending an LLM call.
+    skipped: list[str] = Field(default_factory=list)
 
 
 class SyntheticIngestRequest(BaseModel):

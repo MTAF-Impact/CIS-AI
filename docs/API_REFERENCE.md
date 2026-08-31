@@ -51,47 +51,61 @@ step" pattern as F2's matchmaking).
 
 ### `POST /ingest`
 
-Ingest one piece of content: embeds it, runs it through LLM analysis, persists it.
+Ingest one piece of content: runs it through LLM analysis (which also returns an English
+translation), embeds the translation, persists it. **Auth:** optional `X-API-Key`/`Bearer`
+(see top of this doc) — this and `/ingest/batch` are the ones a crawler hits.
 
 **Request body** (`ContentItemCreate`):
 
 | Field | Type | Required | Constraints | Notes |
 |---|---|---|---|---|
-| `text` | string | yes | `min_length=1` | |
+| `text` | string | yes | `min_length=1` | Original language - translated internally, not by the caller. |
 | `source` | string enum | no | `social`\|`rss`\|`radio`\|`forum`\|`other` | Default `other`. |
 | `author_id` | string \| null | no | | |
 | `location` | string \| null | no | | |
 | `impressions` | int \| null | no | | Feeds Reach (R). |
 | `positive_reaction_count` | int \| null | no | | Feeds Emotional Intensity (EI). |
 | `negative_reaction_count` | int \| null | no | | Feeds Emotional Intensity (EI). |
+| `external_ref` | string \| null | no | `max_length=512` | Dedup key for automated sources (e.g. `"telegram:<channel_id>:<message_id>"`). If omitted, no dedup applies to this item. |
 
 **201** (`ContentItemRead`):
 ```json
 {
-  "id": "uuid", "text": "...", "source": "social", "author_id": null, "location": "Sudirman",
-  "outrage_score": 0.62, "moral_foundation": "fairness",
+  "id": "uuid", "text": "...", "text_en": "...", "source": "social", "author_id": null,
+  "location": "Sudirman", "outrage_score": 0.62, "moral_foundation": "fairness",
   "extracted_claim": "The ERP charge is a hidden tax", "underlying_grievance": "cost-of-living anxiety",
   "stance": null, "impressions": null, "positive_reaction_count": null, "negative_reaction_count": null,
-  "claim_id": null, "created_at": "2026-08-31T10:00:00Z"
+  "external_ref": null, "claim_id": null, "created_at": "2026-08-31T10:00:00Z"
 }
 ```
 `stance` and `claim_id` are always `null` at ingest time — stance is only assessable
 once a claim exists, and clustering runs asynchronously after this response returns.
 
+**Idempotent on `external_ref`:** if a non-null `external_ref` was already ingested, this
+returns the **existing** item (still `201`, not an error) instead of creating a duplicate
+or spending another LLM call.
+
 **503:** `{"detail": "OPENAI_API_KEY is not configured..."}` if no LLM key is set.
 
 ### `POST /ingest/batch`
 
-Same as above, N items in one call. Embeds and analyzes concurrently.
+Same as above, N items in one call. **Dedup runs first** — any item whose `external_ref`
+already exists is skipped *before* it costs an LLM call; the rest are analyzed
+concurrently, then embedded in one batched call. **Auth:** same optional key as above.
 
 **Request body** (`ContentItemBatchCreate`): `{"items": [ContentItemCreate, ...]}` (`min_length=1`).
 
 **201** (`ContentItemBatchResult`):
 ```json
-{"created": [ContentItemRead, ...], "failed": [{"text": "...", "error": "..."}]}
+{
+  "created": [ContentItemRead, ...],
+  "failed": [{"text": "...", "error": "..."}],
+  "skipped": ["telegram:chan:123"]
+}
 ```
-Per-item failures (e.g. one item's LLM call errors) don't abort the whole batch — they
-land in `failed` instead, and everything else still commits.
+`skipped` lists the `external_ref`s that already existed (no LLM call spent on them).
+Per-item analysis failures (e.g. one item's LLM call errors) don't abort the whole batch
+— they land in `failed` instead, and everything else still commits.
 
 ### `POST /ingest/generate-synthetic`
 
@@ -118,6 +132,26 @@ sample data" button, not production traffic.
 The 3 `claims_*` fields are `null` if `auto_cluster` was `false`.
 
 **502:** if the LLM returns zero posts. **422:** `count` out of `[1, 50]`. **503:** no LLM key.
+
+---
+
+## Fault Lines
+
+### `GET /fault-lines`
+
+Read-only listing of every `fault_lines` row. No params, no auth. This is the "living
+exemplar corpus" a relevance-filtering crawler is expected to fetch each run (compare a
+candidate post's embedding against these via cosine similarity, rather than keyword
+matching) — see `ARCHITECTURE.md`.
+
+**200:**
+```json
+[{
+  "id": "uuid", "community_name": "Kampung Pulo",
+  "grievance_theme": "Historical eviction distrust (Ciliwung normalization)",
+  "description": "...", "created_at": "2026-08-31T00:56:10Z"
+}]
+```
 
 ---
 

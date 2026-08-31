@@ -24,11 +24,18 @@ class ContentItem(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     text: Mapped[str] = mapped_column(Text, nullable=False)
+    # LLM-translated English text actually used for embedding - the embedding model is
+    # English-only. Echoes `text` when the source is already English.
+    text_en: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[ContentSource] = mapped_column(
         String(32), default=ContentSource.OTHER, nullable=False
     )
     author_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Dedup key for automated sources, e.g. "telegram:<channel_id>:<message_id>" or
+    # "rss:<feed_url>:<guid>". Null (and unenforced) for manual/synthetic ingestion.
+    external_ref: Mapped[str | None] = mapped_column(String(512), unique=True, nullable=True)
 
     # LLM analysis output
     outrage_score: Mapped[float | None] = mapped_column(Float, nullable=True)

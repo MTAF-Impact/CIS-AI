@@ -10,6 +10,9 @@ class ContentAnalysisSchema(BaseModel):
     moral_foundation: MoralFoundation
     extracted_claim: str
     underlying_grievance: str
+    # English translation, used for embedding (English-only model) - echoes the
+    # original text when it's already English.
+    text_en: str
 
 
 class ClaimSummarySchema(BaseModel):
