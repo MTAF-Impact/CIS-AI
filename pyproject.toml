@@ -22,6 +22,7 @@ dependencies = [
     "openai>=1.60.0",
     "torch>=2.0.0",
     "pypdf>=6.16.2",
+    "cryptography>=42.0.0",  # pypdf needs this to read AES-encrypted PDFs (common for real gov docs)
     "python-docx>=1.2.0",
     "python-igraph>=0.11.0",
     "leidenalg>=0.10.0",
