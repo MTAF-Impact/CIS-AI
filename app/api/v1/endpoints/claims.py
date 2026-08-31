@@ -274,7 +274,10 @@ async def cluster_now(
 
 @router.post("/rescore", response_model=RescoreResponse)
 async def rescore(db: AsyncSession = Depends(get_db)) -> RescoreResponse:
-    """Time-based NPR/Velocity/discount/final re-evaluation for every Existing claim."""
+    """Time-based NPR/Velocity/discount/final re-evaluation for every Existing claim.
+    F5's velocity-crossing trigger (PRD 10.5.8 point 2) is now the backend's decision -
+    it watches velocity_score itself (it reads this table directly) and calls
+    POST /coordination/detection-runs when a claim crosses the threshold."""
     count = await rescore_all_existing_claims(db)
     return RescoreResponse(claims_rescored=count)
 

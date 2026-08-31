@@ -9,6 +9,7 @@ from app.api.v1.endpoints import (
     health,
     ingestion,
     matchmaking,
+    networks,
     policies,
     topics,
 )
@@ -23,5 +24,6 @@ api_router.include_router(policies.router)
 api_router.include_router(alerts.router)
 api_router.include_router(admin.router)
 api_router.include_router(coordination.router)
+api_router.include_router(networks.coordination_router)
 api_router.include_router(matchmaking.router)
 api_router.include_router(fault_lines.router)

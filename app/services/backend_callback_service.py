@@ -20,21 +20,26 @@ async def report_matchmaking_result(
     matched_claim_count: int | None = None,
     generated_claim_count: int | None = None,
     error: str | None = None,
+    callback_url: str | None = None,
 ) -> None:
     """Best-effort: a failed callback is logged, never raised - the backend's own retry
-    job covers this case."""
-    if not settings.BACKEND_URL:
+    job covers this case. callback_url (from the Flow 1 request body) is preferred over
+    BACKEND_URL when present - it's what lets one AI deployment serve staging and
+    production without either side hardcoding the other's host."""
+    base = callback_url or settings.BACKEND_URL
+    if not base:
         logger.warning(
-            "BACKEND_URL not configured - skipping matchmaking-result callback for "
-            "backend policy %s (status=%s)",
+            "No callback_url and BACKEND_URL not configured - skipping matchmaking-result "
+            "callback for backend policy %s (status=%s)",
             backend_policy_id,
             status,
         )
         return
 
-    url = (
-        f"{settings.BACKEND_URL.rstrip('/')}/api/v1/internal/policies/"
-        f"{backend_policy_id}/matchmaking-result"
+    # callback_url, when supplied, is already the full target URL; BACKEND_URL is just
+    # the host and needs the path appended.
+    url = base if callback_url else (
+        f"{base.rstrip('/')}/api/v1/internal/policies/{backend_policy_id}/matchmaking-result"
     )
     body: dict = {"status": status}
     if ai_policy_id is not None:

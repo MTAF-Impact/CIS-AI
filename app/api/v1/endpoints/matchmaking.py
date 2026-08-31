@@ -34,6 +34,8 @@ async def receive_policy_for_matchmaking(
         file_name=payload.file_name,
         file_mime_type=payload.file_mime_type,
         document_url=payload.document_url,
+        force=payload.force,
+        callback_url=payload.callback_url,
         llm=llm,
         embedder=embedder,
         session_factory=session_factory,

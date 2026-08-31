@@ -56,6 +56,11 @@ class Policy(Base):
 
     processing: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)  # matchmaking in progress
 
+    # None = never run yet, or the last run succeeded. Non-null = the last run failed
+    # with this error - the Flow 1 short-circuit (B1/B2) only re-reports when this is
+    # None; otherwise (or when force=True) it re-runs against this same Policy row.
+    last_matchmaking_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

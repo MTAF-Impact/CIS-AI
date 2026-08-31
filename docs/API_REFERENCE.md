@@ -517,15 +517,28 @@ full shape as `GET /claims/{id}` for an existing claim.
 
 ---
 
-## Coordination — CIB check (F5 groundwork)
+## Coordination — F5 detection trigger
+
+### `POST /coordination/detection-runs`
+
+The AI service's entire F5 (Coordinated-Network Detector) API surface, per the
+backend integration doc's ownership split — see `docs/COORDINATION.md` for the full
+pipeline this triggers, the 9 tables it writes, and why everything else (network
+list/detail/review/allowlist/reports/config) moved to the backend.
+
+**Request body**: `{"claim_id": "<uuid> | null", "overrides": {...} | null}`.
+`claim_id` set → single-claim run; omitted/null → full sweep across every Active
+claim. Always returns `202 {"claim_id": ..., "status": "scheduled"}` (fire-and-forget
+`BackgroundTasks`, no synchronous validation of `claim_id`).
+
+## Coordination — CIB check (legacy, unrelated to F5)
 
 ### `POST /coordination/check-cib`
 
 Deterministic heuristic for Coordinated Inauthentic Behavior across a list of posts
 **you supply directly in the request** — this endpoint is stateless, reads nothing from
-the database, and persists nothing. F5 (Coordinated-Network Detector) itself is an
-explicit placeholder in the PRD with no defined data model/action yet; this is
-groundwork ahead of that spec, not an automated pipeline.
+the database, and persists nothing. Predates the full F5 pipeline above and is
+unrelated to it; still mounted, not retired.
 
 **Request body** (`CIBCheckRequest`): `{"posts": [CIBCheckPost, ...]}` (`min_length=2`).
 

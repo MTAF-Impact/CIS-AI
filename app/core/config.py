@@ -29,6 +29,34 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
     EMBEDDING_DIM: int = 384
 
+    # F5 coordination detection - multilingual, separate from the English-only
+    # embedding model above (needed for Signal 2b, PRD 10.5.2.2/10.5.2.5).
+    COORDINATION_MULTILINGUAL_MODEL_NAME: str = (
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    )
+
+    # F5 detection-pipeline tunables (PRD 10.11). Static defaults, not DB-backed - F4's
+    # admin UI (CoordinationSettings) moved to the backend along with all F5 config
+    # ownership; a caller can still override any of these per-run via the `overrides`
+    # field on POST /coordination/detection-runs (see DetectionParams in pipeline.py).
+    COORDINATION_DEFAULT_WINDOW_HOURS: float = 168.0  # 7 days, PRD 10.5.1 default
+    COORDINATION_A_MAX: int = 5000
+    COORDINATION_THETA_EDGE: float = 0.35
+    COORDINATION_K_CORE: int = 3
+    COORDINATION_LEIDEN_RESOLUTION: float = 1.0
+    COORDINATION_N_MIN: int = 5
+    COORDINATION_RHO_MIN: float = 0.30
+    COORDINATION_MU_ANCHOR: float = 0.60
+    COORDINATION_P_MIN: int = 20
+    COORDINATION_OMEGA_MIN: float = 0.15
+    COORDINATION_BIN_WIDTH_SECONDS: int = 60
+    COORDINATION_NULL_MODEL_ALPHA: float = 0.01
+    COORDINATION_TAU_DUP: float = 0.80
+    COORDINATION_TAU_SEM: float = 0.90
+    COORDINATION_L_MIN: int = 25
+    COORDINATION_PROVENANCE_HALF_LIFE_HOURS: float = 36.0
+    COORDINATION_SELF_EXCLUSION_HANDLES: list[str] = Field(default_factory=list)
+
     # CORS
     CORS_ORIGINS: list[str] = Field(default_factory=lambda: ["*"])
 

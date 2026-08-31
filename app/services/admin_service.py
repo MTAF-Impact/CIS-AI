@@ -1,10 +1,13 @@
 """F4 - Admin Setting Page: the global Over/Under Threshold config (US32) and the
 "Generate Generic Claim" MVP/demo utility (US33)."""
 
+import numpy as np
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.admin_setting import SINGLETON_ID, AdminSetting
 from app.models.claim import Claim
+from app.models.policy import ClaimPolicy, Policy
 from app.schemas.content import ContentItemCreate
 from app.services import clustering_service
 from app.services.content_ingestion_service import (
@@ -36,6 +39,30 @@ async def set_threshold(db: AsyncSession, over_threshold: float) -> AdminSetting
     return settings
 
 
+async def _link_to_related_policy(db: AsyncSession, claim: Claim) -> None:
+    """C1 (backend integration ask) - the F1 detail page's Related Policies panel was
+    empty for every demo claim because nothing ever created a claim_policies row.
+    Links to the nearest-by-embedding Policy when any Policy has one; else the most
+    recently created Policy; no-ops if no Policy exists at all - nothing to link to."""
+    if claim.embedding is not None:
+        candidates = (
+            await db.execute(select(Policy).where(Policy.embedding.is_not(None)))
+        ).scalars().all()
+        if candidates:
+            claim_vec = np.asarray(claim.embedding)
+            nearest = max(
+                candidates, key=lambda p: float(np.dot(claim_vec, np.asarray(p.embedding)))
+            )
+            db.add(ClaimPolicy(claim_id=claim.id, policy_id=nearest.id))
+            return
+
+    most_recent = (
+        await db.execute(select(Policy).order_by(Policy.created_at.desc()).limit(1))
+    ).scalar_one_or_none()
+    if most_recent is not None:
+        db.add(ClaimPolicy(claim_id=claim.id, policy_id=most_recent.id))
+
+
 async def generate_demo_existing_claim(
     db: AsyncSession,
     llm: LLMClient,
@@ -59,6 +86,8 @@ async def generate_demo_existing_claim(
 
     for touched_claim in await clustering_service.renormalize_topic_reach(db, claim.topic_id):
         await clustering_service.rescore_claim(db, touched_claim)
+
+    await _link_to_related_policy(db, claim)
 
     await db.commit()
     await db.refresh(claim)

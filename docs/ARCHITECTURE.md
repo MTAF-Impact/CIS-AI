@@ -25,7 +25,8 @@ path is FE → Go backend → this service. See `GO_INTEGRATION.md` for the full
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2`, 384-dim, local (no external API), English-only |
 | Clustering | `hdbscan` (density-based, no fixed cluster count) |
 | Similarity search | `pgvector` cosine distance (topics, official sources, fault lines, policy matching) |
-| Coordination heuristic | deterministic — `scikit-learn` cosine similarity + union-find, no ML model |
+| Coordination detection (F5) | graph-based — `igraph`/`leidenalg` (Leiden community detection), `datasketch` (MinHash), a second multilingual `sentence-transformers` model for semantic paraphrase — see `COORDINATION.md`. The older `scikit-learn`+union-find heuristic (`cib_detector.py`) still exists but is superseded. |
+| PDF reports (F5) | `reportlab`, deterministic (`doc.invariant = 1`) |
 | Package manager | `uv` |
 | Schema management | `Base.metadata.create_all()` — **no migrations tool**. Pre-launch software; the model files are the single source of truth. |
 | Deployment target | Google Cloud Run (structured JSON logging already wired for Cloud Logging) |
@@ -86,7 +87,8 @@ this pattern is what makes that guarantee hold for background work too.
 
 Background-task-scheduling endpoints today: `POST /ingest`, `POST /ingest/batch`
 (clustering), `POST /policies` (matchmaking), `POST /matchmaking/policies` (matchmaking,
-Go-triggered).
+Go-triggered), `POST /coordination/detection-runs` (F5 detection, single-claim or
+full sweep — see `COORDINATION.md`).
 
 ## Module map
 
@@ -99,7 +101,8 @@ app/
 │   ├── logging_config.py           # structured JSON logging (Cloud Logging-compatible) + Timer
 │   └── security.py                  # optional X-API-Key/Bearer check for Go-backend-facing endpoints
 ├── models/                       # SQLAlchemy ORM — see DATA_MODEL.md for full column reference
-│   ├── enums.py                   # ContentSource, MoralFoundation, Stance, ClaimType, ClaimStatus, PolicyStatus
+│   ├── enums.py                   # ContentSource, MoralFoundation, Stance, ClaimType, ClaimStatus,
+│   │                              #   PolicyStatus + F5's DetectionRunStatus/ConfidenceBand
 │   ├── content.py                  # ContentItem
 │   ├── claim.py                     # Claim
 │   ├── topic.py                      # Topic
@@ -108,18 +111,22 @@ app/
 │   ├── admin_setting.py                 # AdminSetting (singleton)
 │   ├── fault_line.py                     # FaultLine
 │   ├── official_source.py                 # OfficialSource
-│   └── topic_volume_bucket.py              # TopicVolumeBucket
+│   ├── topic_volume_bucket.py              # TopicVolumeBucket
+│   └── coordination.py                      # F5 — 9 pipeline-output tables only, see COORDINATION.md
 ├── schemas/                      # Pydantic request/response contracts + LLM structured-output schemas
 │   ├── content.py, claim.py, topic.py, policy.py, alert.py, admin.py, coordination.py, matchmaking.py
+│   ├── coordination_network.py    # F5's trigger request/response schemas (the one endpoint)
 │   └── analysis.py                # every LLM structured-output schema (ContentAnalysisSchema, etc.)
 ├── api/v1/
 │   ├── router.py                  # mounts every endpoint router under /api/v1
 │   └── endpoints/                  # one file per resource — see API_REFERENCE.md
 │       ├── health.py, ingestion.py, claims.py, topics.py, policies.py,
 │       │   alerts.py, admin.py, coordination.py, matchmaking.py
+│       └── networks.py              # F5 — the one detection-run trigger endpoint
 └── services/                     # business logic — see MODULES.md for a per-file walkthrough
     ├── llm_client.py               # OpenAI wrapper, every system prompt, retry/rate-limit handling
-    ├── embedding_service.py         # sentence-transformers wrapper
+    ├── embedding_service.py         # sentence-transformers wrapper (English-only, claim/topic embeddings)
+    ├── multilingual_embedding_service.py  # F5's second embedding model (semantic-paraphrase signal)
     ├── content_ingestion_service.py  # shared embed+analyze+build helpers, RAG grounding-context builder
     ├── clustering_service.py          # the core pipeline: 2-pass clustering, topic assignment,
     │                                  #   stance, scoring orchestration, background-task wrapper
@@ -132,7 +139,8 @@ app/
     ├── backend_callback_service.py            # outbound Flow 2 callback to the Go backend
     ├── document_extraction.py                  # PDF/.docx text extraction
     ├── admin_service.py                         # F4 threshold + one-click demo-claim generation
-    └── cib_detector.py                           # deterministic CIB heuristic (F5 groundwork)
+    ├── cib_detector.py                           # deterministic CIB heuristic — superseded by coordination/
+    └── coordination/                              # F5 — full detection pipeline, see COORDINATION.md
 ```
 
 See `MODULES.md` for what every one of these files does at the function level.
