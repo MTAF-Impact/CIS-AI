@@ -4,11 +4,12 @@ Base URL: `{AI_SERVICE_URL}/api/v1` (local dev: `http://localhost:8000/api/v1`).
 Interactive Swagger UI (auto-generated from the exact same Pydantic schemas documented
 here): `{AI_SERVICE_URL}/docs`. OpenAPI JSON: `{AI_SERVICE_URL}/openapi.json`.
 
-**Auth:** none by default — this deployment assumes the AI service and the Go backend
-only reach each other over a private network. The 2 endpoints the backend calls directly
-(`POST /matchmaking/policies`, `POST /claims/generate-generic`) optionally accept
-`X-API-Key: <AI_SERVICE_API_KEY>` or `Authorization: Bearer <AI_SERVICE_API_KEY>` if that
-env var is ever set — see `GO_INTEGRATION.md`. Every other endpoint is fully open.
+**Auth:** none by default — this deployment assumes every caller reaches the AI service
+over a private network. `POST /matchmaking/policies`, `POST /claims/generate-generic`,
+`POST /ingest`, and `POST /ingest/batch` optionally accept `X-API-Key: <AI_SERVICE_API_KEY>`
+or `Authorization: Bearer <AI_SERVICE_API_KEY>` if that env var is ever set — see
+`GO_INTEGRATION.md`. Every other endpoint is fully open. `/ingest/generate-synthetic` is
+deliberately excluded (manual/demo use, not an automated caller).
 
 **Content type:** `application/json` for every request/response body except `POST
 /policies` (`multipart/form-data`, file upload) and `GET /policies/{id}/file` (returns
@@ -50,47 +51,61 @@ step" pattern as F2's matchmaking).
 
 ### `POST /ingest`
 
-Ingest one piece of content: embeds it, runs it through LLM analysis, persists it.
+Ingest one piece of content: runs it through LLM analysis (which also returns an English
+translation), embeds the translation, persists it. **Auth:** optional `X-API-Key`/`Bearer`
+(see top of this doc) — this and `/ingest/batch` are the ones a crawler hits.
 
 **Request body** (`ContentItemCreate`):
 
 | Field | Type | Required | Constraints | Notes |
 |---|---|---|---|---|
-| `text` | string | yes | `min_length=1` | |
+| `text` | string | yes | `min_length=1` | Original language - translated internally, not by the caller. |
 | `source` | string enum | no | `social`\|`rss`\|`radio`\|`forum`\|`other` | Default `other`. |
 | `author_id` | string \| null | no | | |
 | `location` | string \| null | no | | |
 | `impressions` | int \| null | no | | Feeds Reach (R). |
 | `positive_reaction_count` | int \| null | no | | Feeds Emotional Intensity (EI). |
 | `negative_reaction_count` | int \| null | no | | Feeds Emotional Intensity (EI). |
+| `external_ref` | string \| null | no | `max_length=512` | Dedup key for automated sources (e.g. `"telegram:<channel_id>:<message_id>"`). If omitted, no dedup applies to this item. |
 
 **201** (`ContentItemRead`):
 ```json
 {
-  "id": "uuid", "text": "...", "source": "social", "author_id": null, "location": "Sudirman",
-  "outrage_score": 0.62, "moral_foundation": "fairness",
+  "id": "uuid", "text": "...", "text_en": "...", "source": "social", "author_id": null,
+  "location": "Sudirman", "outrage_score": 0.62, "moral_foundation": "fairness",
   "extracted_claim": "The ERP charge is a hidden tax", "underlying_grievance": "cost-of-living anxiety",
   "stance": null, "impressions": null, "positive_reaction_count": null, "negative_reaction_count": null,
-  "claim_id": null, "created_at": "2026-08-31T10:00:00Z"
+  "external_ref": null, "claim_id": null, "created_at": "2026-08-31T10:00:00Z"
 }
 ```
 `stance` and `claim_id` are always `null` at ingest time — stance is only assessable
 once a claim exists, and clustering runs asynchronously after this response returns.
 
+**Idempotent on `external_ref`:** if a non-null `external_ref` was already ingested, this
+returns the **existing** item (still `201`, not an error) instead of creating a duplicate
+or spending another LLM call.
+
 **503:** `{"detail": "OPENAI_API_KEY is not configured..."}` if no LLM key is set.
 
 ### `POST /ingest/batch`
 
-Same as above, N items in one call. Embeds and analyzes concurrently.
+Same as above, N items in one call. **Dedup runs first** — any item whose `external_ref`
+already exists is skipped *before* it costs an LLM call; the rest are analyzed
+concurrently, then embedded in one batched call. **Auth:** same optional key as above.
 
 **Request body** (`ContentItemBatchCreate`): `{"items": [ContentItemCreate, ...]}` (`min_length=1`).
 
 **201** (`ContentItemBatchResult`):
 ```json
-{"created": [ContentItemRead, ...], "failed": [{"text": "...", "error": "..."}]}
+{
+  "created": [ContentItemRead, ...],
+  "failed": [{"text": "...", "error": "..."}],
+  "skipped": ["telegram:chan:123"]
+}
 ```
-Per-item failures (e.g. one item's LLM call errors) don't abort the whole batch — they
-land in `failed` instead, and everything else still commits.
+`skipped` lists the `external_ref`s that already existed (no LLM call spent on them).
+Per-item analysis failures (e.g. one item's LLM call errors) don't abort the whole batch
+— they land in `failed` instead, and everything else still commits.
 
 ### `POST /ingest/generate-synthetic`
 
@@ -117,6 +132,26 @@ sample data" button, not production traffic.
 The 3 `claims_*` fields are `null` if `auto_cluster` was `false`.
 
 **502:** if the LLM returns zero posts. **422:** `count` out of `[1, 50]`. **503:** no LLM key.
+
+---
+
+## Fault Lines
+
+### `GET /fault-lines`
+
+Read-only listing of every `fault_lines` row. No params, no auth. This is the "living
+exemplar corpus" a relevance-filtering crawler is expected to fetch each run (compare a
+candidate post's embedding against these via cosine similarity, rather than keyword
+matching) — see `ARCHITECTURE.md`.
+
+**200:**
+```json
+[{
+  "id": "uuid", "community_name": "Kampung Pulo",
+  "grievance_theme": "Historical eviction distrust (Ciliwung normalization)",
+  "description": "...", "created_at": "2026-08-31T00:56:10Z"
+}]
+```
 
 ---
 
@@ -482,15 +517,28 @@ full shape as `GET /claims/{id}` for an existing claim.
 
 ---
 
-## Coordination — CIB check (F5 groundwork)
+## Coordination — F5 detection trigger
+
+### `POST /coordination/detection-runs`
+
+The AI service's entire F5 (Coordinated-Network Detector) API surface, per the
+backend integration doc's ownership split — see `docs/COORDINATION.md` for the full
+pipeline this triggers, the 9 tables it writes, and why everything else (network
+list/detail/review/allowlist/reports/config) moved to the backend.
+
+**Request body**: `{"claim_id": "<uuid> | null", "overrides": {...} | null}`.
+`claim_id` set → single-claim run; omitted/null → full sweep across every Active
+claim. Always returns `202 {"claim_id": ..., "status": "scheduled"}` (fire-and-forget
+`BackgroundTasks`, no synchronous validation of `claim_id`).
+
+## Coordination — CIB check (legacy, unrelated to F5)
 
 ### `POST /coordination/check-cib`
 
 Deterministic heuristic for Coordinated Inauthentic Behavior across a list of posts
 **you supply directly in the request** — this endpoint is stateless, reads nothing from
-the database, and persists nothing. F5 (Coordinated-Network Detector) itself is an
-explicit placeholder in the PRD with no defined data model/action yet; this is
-groundwork ahead of that spec, not an automated pipeline.
+the database, and persists nothing. Predates the full F5 pipeline above and is
+unrelated to it; still mounted, not retired.
 
 **Request body** (`CIBCheckRequest`): `{"posts": [CIBCheckPost, ...]}` (`min_length=2`).
 

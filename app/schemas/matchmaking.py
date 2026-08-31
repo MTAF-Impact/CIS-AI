@@ -15,6 +15,8 @@ class PolicyMatchmakingWebhookRequest(BaseModel):
     file_name: str | None = None
     file_mime_type: str | None = None
     document_url: str | None = None
+    force: bool = False  # re-run unconditionally (rematch / document replacement), never re-report
+    callback_url: str | None = None  # preferred over BACKEND_URL when present (staging/prod split)
 
 
 class PolicyMatchmakingAckResponse(BaseModel):

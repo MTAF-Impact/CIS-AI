@@ -24,6 +24,7 @@ from app.services.claim_prediction_service import predict_non_existing_claim
 from app.services.clustering_service import cluster_unclustered_content
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.llm_client import LLMClient, get_llm_client
+from scripts._backend_guard import refuse_if_backend_connected
 
 configure_logging(level=settings.LOG_LEVEL, json_format=False)
 logger = logging.getLogger("seed_demo_data")
@@ -218,6 +219,7 @@ DEMO_POLICY_PREDICTIONS: list[tuple[str, str, date]] = [
 
 async def ensure_schema() -> None:
     async with engine.begin() as conn:
+        await refuse_if_backend_connected(conn)
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
 

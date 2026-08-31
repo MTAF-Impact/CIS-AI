@@ -9,7 +9,7 @@ from datetime import date
 
 import httpx
 import numpy as np
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.database import get_session_factory
@@ -157,12 +157,20 @@ async def run_matchmaking_webhook(
     file_name: str | None,
     file_mime_type: str | None,
     document_url: str | None,
+    force: bool = False,
+    callback_url: str | None = None,
     llm: LLMClient | None = None,
     embedder: EmbeddingService | None = None,
     session_factory: async_sessionmaker | None = None,
 ) -> None:
     """Flow 1 handler - creates a Policy for a backend-uploaded policy, runs matchmaking,
-    always reports back via Flow 2. Idempotent per backend_policy_id (see GO_INTEGRATION.md)."""
+    always reports back via Flow 2. Idempotent per backend_policy_id UNLESS force=True or
+    the previous run failed (Policy.last_matchmaking_error is set) - in either of those
+    cases this re-runs against the SAME policy row (ai_policy_id never changes) and
+    supersedes its prior claim_policies links and predicted claims rather than
+    duplicating them. See AI_REQUIREMENT_FOR_INTEGRATION_SUMMARY_V1.md B1/B2 - previously
+    ANY existing row short-circuited unconditionally, so a failed run could never recover
+    and force was never read at all."""
     llm = llm or get_llm_client()
     embedder = embedder or get_embedding_service()
     session_factory = session_factory or get_session_factory()
@@ -171,10 +179,12 @@ async def run_matchmaking_webhook(
         existing = (
             await db.execute(select(Policy).where(Policy.backend_policy_id == backend_policy_id))
         ).scalar_one_or_none()
-        if existing is not None:
+
+        if existing is not None and not force and existing.last_matchmaking_error is None:
             logger.info(
-                "Matchmaking webhook retry for backend policy %s - re-reporting existing "
-                "result (ai_policy_id=%s) instead of re-running the pipeline",
+                "Matchmaking webhook retry for backend policy %s - genuinely succeeded "
+                "before, re-reporting existing result (ai_policy_id=%s) instead of "
+                "re-running the pipeline",
                 backend_policy_id,
                 existing.id,
             )
@@ -198,25 +208,53 @@ async def run_matchmaking_webhook(
                 status="completed",
                 matched_claim_count=matched_count,
                 generated_claim_count=generated_count,
+                callback_url=callback_url,
             )
             return
 
         extracted_text, file_data = await _fetch_and_extract(file_name, file_mime_type, document_url)
 
-        policy = Policy(
-            title=name,
-            description=description,
-            rolled_out_date=rolled_out_date,
-            extracted_text=extracted_text,
-            file_name=file_name,
-            file_content_type=file_mime_type,
-            file_data=file_data,
-            backend_policy_id=backend_policy_id,
-            processing=True,
-        )
-        db.add(policy)
-        await db.commit()
-        await db.refresh(policy)
+        if existing is not None:
+            # force=True, or the previous run failed - re-run against the SAME row so
+            # ai_policy_id (the backend's join key) never changes, and supersede its
+            # prior correlations rather than duplicating them.
+            logger.info(
+                "Matchmaking webhook re-run for backend policy %s (force=%s, "
+                "previous_error=%r) - reusing ai_policy_id=%s",
+                backend_policy_id, force, existing.last_matchmaking_error, existing.id,
+            )
+            policy = existing
+            policy.title = name
+            policy.description = description
+            policy.rolled_out_date = rolled_out_date
+            if document_url:
+                policy.extracted_text = extracted_text
+                policy.file_name = file_name
+                policy.file_content_type = file_mime_type
+                policy.file_data = file_data
+            policy.processing = True
+            await db.execute(delete(ClaimPolicy).where(ClaimPolicy.policy_id == policy.id))
+            await db.execute(
+                delete(Claim).where(
+                    Claim.policy_id == policy.id, Claim.claim_type == ClaimType.NON_EXISTING
+                )
+            )
+            await db.commit()
+        else:
+            policy = Policy(
+                title=name,
+                description=description,
+                rolled_out_date=rolled_out_date,
+                extracted_text=extracted_text,
+                file_name=file_name,
+                file_content_type=file_mime_type,
+                file_data=file_data,
+                backend_policy_id=backend_policy_id,
+                processing=True,
+            )
+            db.add(policy)
+            await db.commit()
+            await db.refresh(policy)
 
         matched_count, generated_count = 0, 0
         error: str | None = None
@@ -229,6 +267,7 @@ async def run_matchmaking_webhook(
             error = str(exc)
         finally:
             policy.processing = False
+            policy.last_matchmaking_error = error
             await db.commit()
 
         await backend_callback_service.report_matchmaking_result(
@@ -238,4 +277,5 @@ async def run_matchmaking_webhook(
             matched_claim_count=matched_count,
             generated_claim_count=generated_count,
             error=error,
+            callback_url=callback_url,
         )

@@ -64,10 +64,19 @@ button:
   continuity. Not the same as `rag_service`'s grounding builder (see below) — this one
   is a lightweight "what's already active" summary for generation, not a targeted
   similarity retrieval.
-- `analyze_and_build_item(payload, llm, embedding)` — the one function that turns a raw
-  `ContentItemCreate` + a pre-computed embedding into a persisted-ready `ContentItem`
-  ORM object (calls `llm.analyze_content` internally). Every ingestion path funnels
-  through this.
+- `analyze_content_item(payload, llm)` — runs `llm.analyze_content` only (which also
+  returns an English translation, `text_en` - the embedding model is English-only).
+  Split out from embedding so callers ingesting many items can analyze concurrently,
+  then embed all the resulting translations in one batched `embed_batch` call.
+- `build_content_item(payload, analysis, embedding)` — pure, synchronous: assembles the
+  `ContentItem` ORM object from a payload + its analysis + its (already-computed)
+  embedding. Includes `payload.external_ref` for dedup (see `DATA_MODEL.md`).
+- `analyze_and_build_item(payload, llm, embedder)` — single-item convenience wrapper:
+  `analyze_content_item` → embed `analysis.text_en` → `build_content_item`. Used by
+  `POST /ingest` and `admin_service.generate_demo_existing_claim`. Batch-oriented
+  callers (`POST /ingest/batch`, `/ingest/generate-synthetic`) use the two split
+  functions directly to preserve `embed_batch`'s performance win — see
+  `ingestion.py::_analyze_and_build_batch`.
 
 ---
 

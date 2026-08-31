@@ -48,3 +48,17 @@ class PolicyStatus(str, enum.Enum):
 
     NOT_ROLLED_OUT = "not_rolled_out"
     ROLLED_OUT = "rolled_out"
+
+
+class DetectionRunStatus(str, enum.Enum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ConfidenceBand(str, enum.Enum):
+    """PRD 10.6.2 - a network's evidentiary strength, distinct from its raw score."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"

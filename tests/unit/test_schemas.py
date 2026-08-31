@@ -16,6 +16,7 @@ class TestContentAnalysisSchema:
             moral_foundation=MoralFoundation.FAIRNESS,
             extracted_claim="claim",
             underlying_grievance="grievance",
+            text_en="claim text",
         )
         assert schema.outrage_score == 0.5
 
@@ -27,6 +28,7 @@ class TestContentAnalysisSchema:
                 moral_foundation=MoralFoundation.NEUTRAL,
                 extracted_claim="claim",
                 underlying_grievance="grievance",
+                text_en="claim text",
             )
 
     def test_unknown_moral_foundation_value_rejected(self):
@@ -36,6 +38,7 @@ class TestContentAnalysisSchema:
                 moral_foundation="not_a_real_moral_foundation",
                 extracted_claim="claim",
                 underlying_grievance="grievance",
+                text_en="claim text",
             )
 
 

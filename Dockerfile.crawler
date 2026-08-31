@@ -1,0 +1,42 @@
+# Cloud Run Job image for the crawler - run-to-completion, not a Service (see
+# docs/CRAWLER.md). No BuildKit --mount syntax, matching the main Dockerfile's fix for
+# Cloud Run's classic-builder "deploy from source" pipeline.
+
+# ---------- Build stage ----------
+FROM python:3.11-slim AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0
+
+WORKDIR /app
+
+COPY uv.lock pyproject.toml /app/
+RUN uv sync --frozen --no-install-project --no-dev --group crawler
+
+COPY . /app
+
+RUN uv sync --frozen --no-dev --group crawler
+
+# ---------- Runtime stage ----------
+FROM python:3.11-slim
+
+# libgomp1 is required at runtime by torch/sentence-transformers (OpenMP)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --uid 1000 appuser
+WORKDIR /app
+
+COPY --from=builder --chown=appuser:appuser /app /app
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONUTF8=1
+
+USER appuser
+
+CMD ["python", "-m", "crawler.main"]

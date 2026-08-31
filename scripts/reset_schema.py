@@ -15,6 +15,7 @@ import app.models  # noqa: F401 - registers all ORM models on Base.metadata
 from app.core.config import settings
 from app.core.database import Base, engine
 from app.core.logging_config import configure_logging
+from scripts._backend_guard import refuse_if_backend_connected
 
 configure_logging(level=settings.LOG_LEVEL, json_format=False)
 logger = logging.getLogger("reset_schema")
@@ -25,6 +26,7 @@ FOREIGN_TABLE_PREFIXES = ("cis_",)
 
 async def reset_schema() -> None:
     async with engine.begin() as conn:
+        await refuse_if_backend_connected(conn)
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
 
         # Query pg_tables directly rather than Base.metadata.drop_all() alone, which

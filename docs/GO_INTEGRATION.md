@@ -251,12 +251,31 @@ being private-only.
 
 ---
 
+## Coordinated-Network Detector (F5) — a 4th touchpoint, and the one read exception
+
+F5 is built (PRD v1.4 §10), scoped per the backend integration doc's ownership split
+(`AI_REQUIREMENT_FOR_INTEGRATION_SUMMARY_V1.md`, section G): this service keeps only
+the detection pipeline + its 9 output tables + one trigger endpoint. Everything
+human-facing (network list/detail/review, allowlist CRUD, PDF/ZIP reports, F4 config,
+export audit log) is the backend's — it reads the 9 tables directly, same as every
+other AI-owned table above.
+
+- **`POST /coordination/detection-runs`** (a 4th HTTP touchpoint beyond the 3 flows
+  above) — the backend calls this whenever it decides to run detection (its own
+  schedule, its own velocity watch, or an analyst's on-demand click); this service
+  just runs the pipeline. See `docs/COORDINATION.md` for the request shape.
+- **The one exception to "never a write-surface... between the two services" above,
+  in the opposite direction**: this service *reads* the backend-owned
+  `cis_coordination_allowlist` table (read-only, this table only) before candidate
+  selection, so declared-legitimate coordination stays excluded. Column names
+  assumed on this side (`handle`, `removed_at`) are a placeholder pending
+  confirmation of the actual DDL — see `COORDINATION.md`'s data-model section.
+- The old `POST /coordination/check-cib` stateless heuristic (posts supplied directly
+  in the request, no DB read/write) still exists, predates the real pipeline, and is
+  unrelated to it — not retired, just superseded.
+
 ## What's explicitly out of scope / deferred
 
-- **Coordinated-Network Detector (F5):** `/coordination/check-cib` is a stateless
-  utility (posts supplied directly in the request, no DB read/write) — not wired to run
-  automatically, because F5 itself is still a placeholder in the PRD with no defined data
-  model or downstream action. Revisit once F5 is actually specified by the PM.
 - **`cis_policies.file_path`:** this service never reads or needs to know the backend's
   own permanent storage path for the uploaded document — it only ever consumes the
   time-limited `document_url` given in the Flow 1 request, once, immediately.

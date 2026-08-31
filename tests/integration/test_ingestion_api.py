@@ -1,5 +1,6 @@
 import pytest
 
+from app.models.fault_line import FaultLine
 from app.services.llm_client import get_llm_client
 from tests.fakes import AlwaysFailingLLMClient, FakeLLMClient
 
@@ -69,3 +70,71 @@ class TestGenerateSynthetic:
         finally:
             app.dependency_overrides[get_llm_client] = FakeLLMClient
         assert response.status_code == 503
+
+
+class TestTranslation:
+    async def test_analysis_populates_text_en(self, client):
+        response = await client.post(
+            "/api/v1/ingest", json={"text": "The ERP charge is a hidden tax."}
+        )
+        assert response.status_code == 201
+        assert response.json()["text_en"] == "The ERP charge is a hidden tax."
+
+
+class TestExternalRefDedup:
+    async def test_single_ingest_is_idempotent_on_external_ref(self, client):
+        payload = {"text": "Duplicate-prone crawled post.", "external_ref": "rss:feedA:guid-1"}
+
+        first = await client.post("/api/v1/ingest", json=payload)
+        assert first.status_code == 201
+        first_id = first.json()["id"]
+
+        second = await client.post("/api/v1/ingest", json=payload)
+        assert second.status_code == 201
+        assert second.json()["id"] == first_id  # same row, not a duplicate
+
+    async def test_batch_ingest_skips_already_seen_external_refs(self, client):
+        seed = await client.post(
+            "/api/v1/ingest",
+            json={"text": "Already-seen post.", "external_ref": "telegram:chan:123"},
+        )
+        assert seed.status_code == 201
+
+        response = await client.post(
+            "/api/v1/ingest/batch",
+            json={
+                "items": [
+                    {"text": "Already-seen post.", "external_ref": "telegram:chan:123"},
+                    {"text": "Brand-new post.", "external_ref": "telegram:chan:456"},
+                ]
+            },
+        )
+        assert response.status_code == 201
+        body = response.json()
+        assert body["skipped"] == ["telegram:chan:123"]
+        assert len(body["created"]) == 1
+        assert body["created"][0]["external_ref"] == "telegram:chan:456"
+
+    async def test_items_without_external_ref_are_never_deduped(self, client):
+        payload = {"text": "No external ref on this one."}
+        first = await client.post("/api/v1/ingest", json=payload)
+        second = await client.post("/api/v1/ingest", json=payload)
+        assert first.status_code == second.status_code == 201
+        assert first.json()["id"] != second.json()["id"]
+
+
+class TestFaultLinesEndpoint:
+    async def test_lists_fault_lines(self, client, db_session):
+        db_session.add(
+            FaultLine(
+                community_name="Kampung Pulo",
+                grievance_theme="Eviction distrust",
+                description="Historical eviction distrust.",
+            )
+        )
+        await db_session.commit()
+
+        response = await client.get("/api/v1/fault-lines")
+        assert response.status_code == 200
+        body = response.json()
+        assert any(fl["community_name"] == "Kampung Pulo" for fl in body)

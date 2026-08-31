@@ -2,11 +2,14 @@
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.models.content import ContentItem
 from app.models.fault_line import FaultLine
 from app.models.topic import Topic
+from app.schemas.analysis import ContentAnalysisSchema
 from app.schemas.content import ContentItemCreate
+from app.services.embedding_service import EmbeddingService
 from app.services.llm_client import LLMClient
 
 # Caps how much context feeds back into generation prompts.
@@ -35,14 +38,18 @@ async def build_grounding_context(db: AsyncSession) -> str:
     return "\n\n".join(parts)
 
 
-async def analyze_and_build_item(
-    payload: ContentItemCreate,
-    llm: LLMClient,
-    embedding: list[float],
+async def analyze_content_item(payload: ContentItemCreate, llm: LLMClient) -> ContentAnalysisSchema:
+    """LLM analysis only - call embed separately (single or batched) before
+    build_content_item, using analysis.text_en as the embedding input."""
+    return await llm.analyze_content(payload.text)
+
+
+def build_content_item(
+    payload: ContentItemCreate, analysis: ContentAnalysisSchema, embedding: list[float]
 ) -> ContentItem:
-    analysis = await llm.analyze_content(payload.text)
     return ContentItem(
         text=payload.text,
+        text_en=analysis.text_en,
         source=payload.source,
         author_id=payload.author_id,
         location=payload.location,
@@ -53,5 +60,15 @@ async def analyze_and_build_item(
         impressions=payload.impressions,
         positive_reaction_count=payload.positive_reaction_count,
         negative_reaction_count=payload.negative_reaction_count,
+        external_ref=payload.external_ref,
         embedding=embedding,
     )
+
+
+async def analyze_and_build_item(
+    payload: ContentItemCreate, llm: LLMClient, embedder: EmbeddingService
+) -> ContentItem:
+    """Single-item convenience: analyze (getting text_en), then embed the translation."""
+    analysis = await analyze_content_item(payload, llm)
+    embedding = await run_in_threadpool(embedder.embed, analysis.text_en or payload.text)
+    return build_content_item(payload, analysis, embedding)

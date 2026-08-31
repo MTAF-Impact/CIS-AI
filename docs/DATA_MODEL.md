@@ -96,7 +96,8 @@ transcript excerpt). See `app/models/content.py`.
 | Column | Type | Nullable | Default | Notes |
 |---|---|---|---|---|
 | `id` | `uuid` | No | `uuid4()` | |
-| `text` | `text` | No | — | The raw content itself. |
+| `text` | `text` | No | — | The raw content itself, original language. |
+| `text_en` | `text` | Yes | `NULL` | LLM-translated English text, what's actually embedded (the embedding model is English-only). Echoes `text` when already English. |
 | `source` | `varchar(32)` | No | `other` | `social` \| `rss` \| `radio` \| `forum` \| `other`. |
 | `author_id` | `varchar(255)` | Yes | `NULL` | Whatever handle/identifier the source provides (e.g. `@driver_jkt`). Drives the Top 5 Accounts panel. |
 | `location` | `varchar(255)` | Yes | `NULL` | Free-text, typically a neighborhood/landmark. |
@@ -108,7 +109,8 @@ transcript excerpt). See `app/models/content.py`.
 | `impressions` | `integer` | Yes | `NULL` | Optional raw metric, feeds Reach (R). Populated by whatever upstream source provides it; `NULL`/absent is fine. |
 | `positive_reaction_count` | `integer` | Yes | `NULL` | Optional raw metric, feeds Emotional Intensity (EI). |
 | `negative_reaction_count` | `integer` | Yes | `NULL` | Optional raw metric, feeds Emotional Intensity (EI). |
-| `embedding` | `vector(384)` | Yes | `NULL` | Embedding of `text`. |
+| `embedding` | `vector(384)` | Yes | `NULL` | Embedding of `text_en` (falls back to `text` if translation failed). |
+| `external_ref` | `varchar(512)` | Yes | `NULL`, **unique** | Dedup key for automated sources, e.g. `"telegram:<channel_id>:<message_id>"`, `"rss:<feed_url>:<guid>"`. `NULL` (and unenforced) for manual/synthetic ingestion — `POST /ingest`/`POST /ingest/batch` are idempotent per `external_ref` when it's set. |
 | `claim_id` | `uuid` | Yes | `NULL` | FK → `claims.id`, `ON DELETE SET NULL`. `NULL` until clustered. |
 | `created_at` | `timestamptz` | No | `now()` | The content's own timestamp (not the ingestion time — for real crawled content this should be the post's actual publish time). |
 

@@ -13,6 +13,9 @@ with **API Reference** and **Go Integration**.
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Tech stack, request lifecycle, the background-task pattern (read this before adding any async work), module map, key design decisions. |
 | [`MODULES.md`](./MODULES.md) | Function-by-function walkthrough of every file in `app/services/` — what it does, what calls it, what it calls. |
 | [`SETUP.md`](./SETUP.md) | Local dev, every environment variable, seeding/schema-reset scripts, testing, CI/CD, deployment target. |
+| [`CRAWLER.md`](./CRAWLER.md) | The `crawler/` Cloud Run Job that feeds real content into `/ingest/batch` — env vars, local dry-run, manual setup steps, deployment. |
+| [`COORDINATION.md`](./COORDINATION.md) | F5 — Coordinated-Network Detector: the detection pipeline (Stages 0-6), the one run-trigger endpoint, the 9-table data model, config, and governance — scoped to what this service owns per the backend ownership split (list/detail/review/allowlist/reports/F4-config moved to the backend). |
+| [`F5_TRACEABILITY.md`](./F5_TRACEABILITY.md) | PRD v1.4 Section 10 requirements mapped to current status — pipeline stages still traced item-by-item; US43-64 marked moved-to-backend now that ownership split. |
 
 The top-level [`README.md`](../README.md) stays the quick-start entry point (install,
 run, curl examples) — these docs are the exhaustive reference behind it.
