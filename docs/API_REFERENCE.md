@@ -4,11 +4,12 @@ Base URL: `{AI_SERVICE_URL}/api/v1` (local dev: `http://localhost:8000/api/v1`).
 Interactive Swagger UI (auto-generated from the exact same Pydantic schemas documented
 here): `{AI_SERVICE_URL}/docs`. OpenAPI JSON: `{AI_SERVICE_URL}/openapi.json`.
 
-**Auth:** none by default — this deployment assumes the AI service and the Go backend
-only reach each other over a private network. The 2 endpoints the backend calls directly
-(`POST /matchmaking/policies`, `POST /claims/generate-generic`) optionally accept
-`X-API-Key: <AI_SERVICE_API_KEY>` or `Authorization: Bearer <AI_SERVICE_API_KEY>` if that
-env var is ever set — see `GO_INTEGRATION.md`. Every other endpoint is fully open.
+**Auth:** none by default — this deployment assumes every caller reaches the AI service
+over a private network. `POST /matchmaking/policies`, `POST /claims/generate-generic`,
+`POST /ingest`, and `POST /ingest/batch` optionally accept `X-API-Key: <AI_SERVICE_API_KEY>`
+or `Authorization: Bearer <AI_SERVICE_API_KEY>` if that env var is ever set — see
+`GO_INTEGRATION.md`. Every other endpoint is fully open. `/ingest/generate-synthetic` is
+deliberately excluded (manual/demo use, not an automated caller).
 
 **Content type:** `application/json` for every request/response body except `POST
 /policies` (`multipart/form-data`, file upload) and `GET /policies/{id}/file` (returns

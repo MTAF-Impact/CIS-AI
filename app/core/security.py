@@ -1,4 +1,5 @@
-"""Optional auth for the Go backend's inbound webhooks. No-op if AI_SERVICE_API_KEY is unset."""
+"""Optional inbound API key check (Go backend webhooks + crawler ingest). No-op if
+AI_SERVICE_API_KEY is unset."""
 
 import hmac
 

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.concurrency import run_in_threadpool
 
 from app.core.database import get_db, get_session_factory
+from app.core.security import verify_backend_api_key
 from app.models.content import ContentItem
 from app.schemas.content import (
     ContentItemBatchCreate,
@@ -35,7 +36,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
 
 
-@router.post("", response_model=ContentItemRead, status_code=201)
+@router.post(
+    "",
+    response_model=ContentItemRead,
+    status_code=201,
+    dependencies=[Depends(verify_backend_api_key)],
+)
 async def ingest_content(
     payload: ContentItemCreate,
     background_tasks: BackgroundTasks,
@@ -60,7 +66,12 @@ async def ingest_content(
     return item
 
 
-@router.post("/batch", response_model=ContentItemBatchResult, status_code=201)
+@router.post(
+    "/batch",
+    response_model=ContentItemBatchResult,
+    status_code=201,
+    dependencies=[Depends(verify_backend_api_key)],
+)
 async def ingest_content_batch(
     payload: ContentItemBatchCreate,
     background_tasks: BackgroundTasks,
