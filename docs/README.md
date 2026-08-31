@@ -13,6 +13,7 @@ with **API Reference** and **Go Integration**.
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Tech stack, request lifecycle, the background-task pattern (read this before adding any async work), module map, key design decisions. |
 | [`MODULES.md`](./MODULES.md) | Function-by-function walkthrough of every file in `app/services/` — what it does, what calls it, what it calls. |
 | [`SETUP.md`](./SETUP.md) | Local dev, every environment variable, seeding/schema-reset scripts, testing, CI/CD, deployment target. |
+| [`CRAWLER.md`](./CRAWLER.md) | The `crawler/` Cloud Run Job that feeds real content into `/ingest/batch` — env vars, local dry-run, manual setup steps, deployment. |
 
 The top-level [`README.md`](../README.md) stays the quick-start entry point (install,
 run, curl examples) — these docs are the exhaustive reference behind it.
