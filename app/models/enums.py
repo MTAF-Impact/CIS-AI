@@ -51,6 +51,11 @@ class PolicyStatus(str, enum.Enum):
 
 
 class DetectionRunStatus(str, enum.Enum):
+    """PENDING is the state the row is created in - synchronously, in the request
+    handler, before the 202 response - so run_id is real and queryable immediately.
+    The background task flips it to RUNNING once it actually starts."""
+
+    PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"

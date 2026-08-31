@@ -1,7 +1,12 @@
-"""PRD 10.9 - governance, ethics, and safeguards, scoped to what's still the AI
-service's responsibility after the backend ownership split (see docs/COORDINATION.md):
-minimum-necessary-retention purging of the evidence-artifact tables it still owns
-(10.9.1 point 7).
+"""PRD 10.9 - governance, ethics, and safeguards, scoped to what's the AI service's
+responsibility after the backend ownership split (see docs/COORDINATION.md):
+executing the evidence-artifact purge for networks the backend names (10.9.1 point 7).
+
+The backend computes *which* networks are past retention - it alone can see whether
+a report was generated from a snapshot (cis_network_reports is backend-owned), so it
+alone can honour PRD 10.9.1 point 7's "except where a report was generated" exception.
+It calls POST /api/v1/detection/snapshots/purge with the list; this module just
+executes the deletion, since the rows are AI-owned.
 
 The standing disclaimer (10.9.2) is no longer rendered by this service - the report/
 detail surfaces that showed it moved to the backend, which must reproduce the exact
@@ -14,13 +19,13 @@ automation verdict (verified by inspection - grep the coordination package for
 code path calls out to a platform API."""
 
 import logging
-from datetime import UTC, datetime, timedelta
+import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.coordination import (
-    CoordinatedNetwork,
+    EvidenceSnapshot,
     NetworkAccount,
     NetworkBurstBin,
     NetworkEdge,
@@ -29,34 +34,18 @@ from app.models.coordination import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_RETENTION_MONTHS = 24
 
-
-async def purge_expired_evidence(
-    db: AsyncSession, retention_months: int = DEFAULT_RETENTION_MONTHS
-) -> int:
-    """10.9.1 point 7 - evidence snapshots are retained for a configurable period and
-    then purged. This deliberately drops the original "except reported" carve-out:
-    "reported" status now lives in the backend's own tables, invisible to this
-    service under "no shared-table writes" - purging is age-based only. Deletes the
-    evidence-artifact rows (posts, burst bins, edges, account membership) for expired
-    networks; the CoordinatedNetwork row itself is kept (it's the durable audit
-    record - only the raw evidence content decays). Returns the count of networks
-    purged. Called automatically at the start of every scheduled sweep
-    (pipeline.run_scheduled_sweep) rather than exposed as its own endpoint, so the
-    AI service still exposes exactly the one F5 route the backend doc describes."""
-    cutoff = datetime.now(UTC) - timedelta(days=retention_months * 30)
-
-    expired_ids = (
-        await db.execute(
-            select(CoordinatedNetwork.id).where(CoordinatedNetwork.created_at < cutoff)
-        )
-    ).scalars().all()
-    if not expired_ids:
+async def purge_expired_evidence(db: AsyncSession, network_ids: list[uuid.UUID]) -> int:
+    """Deletes the evidence-artifact rows (posts, burst bins, edges, account
+    membership) and the evidence_snapshot row for exactly the named networks; the
+    coordinated_network row itself is kept (it's the durable audit record - only the
+    raw evidence content decays). Returns the count of networks purged (== number of
+    ids that actually had something to delete)."""
+    if not network_ids:
         return 0
 
-    for model in (NetworkEvidencePost, NetworkBurstBin, NetworkEdge, NetworkAccount):
-        await db.execute(delete(model).where(model.network_id.in_(expired_ids)))
+    for model in (NetworkEvidencePost, NetworkBurstBin, NetworkEdge, NetworkAccount, EvidenceSnapshot):
+        await db.execute(delete(model).where(model.network_id.in_(network_ids)))
     await db.commit()
-    logger.info("Purged evidence for %d networks older than %d months", len(expired_ids), retention_months)
-    return len(expired_ids)
+    logger.info("Purged evidence for %d networks (backend-supplied list)", len(network_ids))
+    return len(network_ids)

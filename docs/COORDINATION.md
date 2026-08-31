@@ -1,23 +1,27 @@
 # F5 — Coordinated-Network Detector
 
-This service's F5 footprint per the backend integration doc's ownership split
-(`AI_REQUIREMENT_FOR_INTEGRATION_SUMMARY_V1.md`, section G): the detection pipeline
-itself (graph-based clustering, PRD v1.4 §10) plus the 9 tables it writes, plus a
-single run-trigger endpoint. Everything human-facing — network list/detail, review
-workflow, allowlist CRUD, PDF/ZIP report generation, export audit log, F4 config —
-moved to the backend, which reads these 9 tables directly (same "backend `SELECT`s
-your tables, never writes them" pattern already used for `claims`/`policies`/etc).
+This service's F5 footprint matches the backend's **actual reference contract**,
+pulled and reviewed from `CIS-Backend` `main` (commit `910cd82`) this session — not
+an earlier guessed shape. That repo's `internal/aiclient/detection.go` +
+`internal/aiclient/endpoints.go` (the client that calls us),
+`internal/models/f5_ai_tables.go` (their GORM read-models for our tables),
+`docs/sql/01_f5_reference_schema.sql` (the exact DDL), and `docs/AI-INTEGRATION.md`
+"Flow 7"/"Flow 8" are the ground truth. This service owns the detection pipeline
+(graph-based clustering, PRD v1.4 §10) plus 10 tables it writes, exposed through two
+endpoints. Everything human-facing — network list/detail, review workflow, allowlist
+CRUD, PDF/ZIP report generation, export audit log, F4 config — lives on the backend,
+which reads these tables directly (same "backend `SELECT`s your tables, never writes
+them" pattern already used for `claims`/`policies`/etc).
 
-This was a full-spec build in an earlier session (all 8 original phases, ~15
-endpoints, PDF/ZIP generation, F4 admin config — see git history) that was then
-rearchitected down to this scope once the backend document's ownership split was
-reviewed and the user chose to follow it. If you're looking for the removed
-surface (network review, allowlist, reports), it now lives in the Go backend.
-
-See `AI_INTEGRATION_RESPONSE_V1.md` (shared `documentation/CIS` repo) for the
-formal reply to the backend's integration doc — what's implemented, the open
-schema question (G1), and the proposed trigger-endpoint contract awaiting their
-sign-off.
+**History**: a full-spec build in an earlier session (13 tables, ~15 endpoints, PDF/
+ZIP generation, F4 admin config) was rearchitected down to "9 tables + 1 endpoint"
+based on a backend summary document that only sketched the contract loosely. Once the
+backend's actual merged code was reviewed, several concrete mismatches surfaced —
+wrong endpoint paths/count, wrong table names (plural vs. singular), wrong PK column
+names, several missing columns, a missing table, a different purge design — and this
+doc now describes the corrected, verified shape. See `AI_INTEGRATION_RESPONSE_V1.md`
+(shared `documentation/CIS` repo) for the open questions sent back to the backend
+team about a handful of remaining ambiguities.
 
 This supersedes the old `POST /coordination/check-cib` heuristic
 (`app/services/cib_detector.py`), which is still mounted (nothing has asked to
@@ -29,7 +33,7 @@ actually runs on.
 ```
 app/services/coordination/
 ├── types.py                 # SignalPost/SignalAccount - pure dataclasses, no ORM
-├── scope.py                  # Stage 0: candidate selection, allowlist/self-exclusion, A_max cap
+├── scope.py                  # Stage 0: candidate selection, allowlist/self-exclusion, candidate_cap
 ├── signals/
 │   ├── temporal.py             # Signal 1 (w_time) - null-model-corrected synchrony
 │   ├── duplication.py           # Signal 2 (w_text) - MinHash + multilingual semantic paraphrase
@@ -39,174 +43,171 @@ app/services/coordination/
 ├── fusion.py                 # Stage 2: weighted fusion + the multi-signal pruning rule
 ├── clustering.py              # Stage 3: k-core + Leiden community detection
 ├── relevance_gate.py           # Stage 3a: anchoring/evidence-volume/link-strength claim-relevance tests
-├── cluster_metrics.py           # Stage 4: SY/DU/CO/PR/AU + composite CoordinationScore
+├── cluster_metrics.py           # Stage 4: SY/DU/CO/PR/AU + composite CoordinationScore + raw_counts
 ├── confidence.py                 # Stage 4a: confidence banding + allowlist-majority suppression
 ├── evidence.py                    # Stage 5: burst timeline, duplicate-content grouping, account
 │                                  #   annex (centrality), graph layout snapshot
 ├── recurrence.py                   # Stage 6: fingerprinting + Jaccard-based recurrence matching
-├── governance.py                     # Evidence-retention purge (age-based)
-└── pipeline.py                        # Orchestrator: run_detection_for_claim, run_scheduled_sweep,
-                                        #   trigger_detection_run - the only module that touches
-                                        #   the DB in this package's core logic
+├── governance.py                     # Evidence-snapshot purge (backend-driven, by network id)
+└── pipeline.py                        # Orchestrator: create_pending_run, run_detection - the only
+                                        #   module (besides governance.py) that touches the DB
 ```
 
 Every `signals/*.py` and `fusion.py`/`clustering.py`/`relevance_gate.py`/
 `cluster_metrics.py`/`confidence.py`/`evidence.py`/`recurrence.py` function is
 **pure** — no DB access, fully unit-testable with hand-built fixtures. Only
-`pipeline.py` and `governance.py` touch the database. This mirrors the rest of the
-service's separation of concerns (`scoring_engine.py` vs `clustering_service.py`).
+`pipeline.py` and `governance.py` touch the database.
 
 ## Detection pipeline (PRD 10.5)
 
-One call to `pipeline.run_detection_for_claim(claim_id, ...)` runs the full
-sequence and persists everything in one DB transaction:
+`pipeline.run_detection(run_id, claim_ids, window_start, window_end, parameters,
+exclusions, ...)` runs the full sequence **per claim** in `claim_ids` (PRD 10.5.1
+point 6 — multi-claim batch runs pool nothing across claims in this implementation;
+signals/metrics/relevance are independently computed per claim either way, which is
+the part of point 6 that's actually binding) and persists everything under the one
+already-created `run_id`:
 
 1. **Scope** (`scope.py`) — candidate accounts = everyone with ≥1 post in the
-   claim's Supporting-side cluster within window `W` (default 168h). Allowlisted
-   and self-excluded accounts are dropped before graph construction; the remaining
-   set is capped at `A_max` (default 5,000) by post volume.
+   claim's Supporting-side cluster within `[window_start, window_end]` (computed and
+   sent by the backend — PRD 10.5.1's 50%-overlap-between-runs rule is enforced on
+   their side). Allowlisted accounts (from the request's `exclusions.accounts`) are
+   dropped before graph construction; the remaining set is capped at `candidate_cap`
+   (default 5,000) by post volume.
 2. **Signals** (`signals/`) — five independent pairwise similarity scores per
    account pair, each in `[0,1]`. `w_struct` is always `None` today (no
    follower-graph data source exists yet) — see "Known gaps" below.
-3. **Fusion** (`fusion.py`) — weighted sum (`w_time` 0.30, `w_text` 0.25, `w_amp`
-   0.20, `w_meta` 0.15, `w_struct` 0.10 by default; an unavailable family's weight
-   redistributes proportionally). An edge survives only if `w_total ≥ θ_edge`
-   **and** at least two distinct families independently score `≥ 0.25` — this
-   multi-signal rule is the pipeline's primary false-positive control (verified by
-   a dedicated regression test: a single signal at maximum strength can never form
-   an edge alone).
-4. **Clustering** (`clustering.py`) — k-core reduction (`k=3`), then **Leiden**
-   (not Louvain — Louvain can produce internally disconnected communities, which
-   would be indefensible as a "network"). Retention filters: size ≥ `N_min` (5),
-   internal density ≥ `ρ_min` (0.30).
-5. **Claim-relevance gate** (`relevance_gate.py`) — a cluster that passed
-   community detection is not necessarily *about* the claim it was found under.
-   Three tests: anchoring share ≥ `μ_anchor` (0.60), claim-cluster post count ≥
-   `P_min` (20), `overlap_ratio` ≥ `ω_min` (0.15). Clusters that fail become
-   `offtopic_cluster` rows — real coordination, retained for recalibration
-   review (now the backend's, reading this table directly), never surfaced as a
-   network.
+3. **Fusion** (`fusion.py`) — weighted sum (`beta_time`/`beta_text`/`beta_amp`/
+   `beta_meta`/`beta_struct`, defaults 0.30/0.25/0.20/0.15/0.10; an unavailable
+   family's weight redistributes proportionally). An edge survives only if
+   `w_total ≥ edge_threshold` **and** at least `min_signal_families` (default 2)
+   distinct families independently score `≥ 0.25` — this multi-signal rule is the
+   pipeline's primary false-positive control (verified by a dedicated regression
+   test: a single signal at maximum strength can never form an edge alone).
+4. **Clustering** (`clustering.py`) — k-core reduction (`k_core`, default 3), then
+   **Leiden** (not Louvain). Retention filters: size ≥ `min_cluster_size` (5),
+   internal density ≥ `min_internal_density` (0.30).
+5. **Claim-relevance gate** (`relevance_gate.py`) — three tests: anchoring share ≥
+   `anchor_share` (0.60), claim-cluster post count ≥ `min_claim_posts` (20),
+   `overlap_ratio` ≥ `min_link_strength` (0.15). Clusters that fail become
+   `offtopic_cluster` rows — real coordination, retained for recalibration review
+   (the backend's, reading this table directly), never surfaced as a network.
 6. **Cluster metrics + confidence** (`cluster_metrics.py`, `confidence.py`) — SY,
-   DU, CO, PR, AU (each 0–100) combine into `CoordinationScore` (0.25/0.25/0.20/
+   DU, CO, PR, AU (each 0–100, plus the raw integer counts behind each — see
+   `ClusterMetrics.raw_counts`) combine into `CoordinationScore` (0.25/0.25/0.20/
    0.15/0.15 weights). `SignalBreadth` = how many of the five independently score
-   ≥50. Confidence band: High needs score ≥70 **and** breadth ≥3 — a high score
-   with breadth 1 can never reach High, by design (the signature of a false
-   positive, not a campaign). A truncated run or ≥2 unavailable signal families
-   caps the band at Medium regardless of score. A cluster ≥60% allowlisted is
-   suppressed entirely.
+   ≥50. Confidence band cutoffs (`high_score_cutoff`/`high_breadth_cutoff`/
+   `medium_score_cutoff`/`medium_breadth_cutoff`) and `min_signal_families` are now
+   backend-configurable parameters, not compile-time constants. A truncated run or
+   ≥2 unavailable signal families caps the band at Medium regardless of score. A
+   cluster ≥60% allowlisted is **persisted with `allowlist_suppressed=true`**, not
+   silently dropped — the backend suppresses it from every surface but the audit
+   trail stays intact and stable as the allowlist changes underneath it.
 7. **Evidence snapshot** (`evidence.py`) — burst timeline (every 60s bin,
    z-scored), duplicate-content groups (union-find over the same pairwise
-   duplicate flags, one canonical post per group, every post SHA-256'd), account
-   annex (degree/eigenvector centrality via `igraph`), and a force-directed graph
-   layout (Fruchterman-Reingold — a documented substitute for the spec's named
-   ForceAtlas2, not a second graph-layout dependency for cosmetic parity).
+   duplicate flags, one canonical post per group, every post SHA-256'd, group id a
+   deterministic UUID), account annex (degree/eigenvector centrality via `igraph`,
+   plus per-account `layout_x`/`layout_y`), and up to `community_size` "comparison"
+   accounts — genuine unclustered candidates from the same claim, for contrast
+   (US51/PRD 10.8 item 5).
 8. **Recurrence** (`recurrence.py`) — a fingerprint (hashed member-ID set + top
-   terms) plus real member-set Jaccard matching (≥0.50) against prior networks
-   sets `parent_network_id`. A recurring network still has to pass the
-   claim-relevance gate against the *new* claim on its own merits.
-9. **Persistence** (`pipeline.py`) — `detection_run`, `coordinated_network` +
-   its `network_account`/`network_edge`/`network_evidence_post`/
-   `network_burst_bin`/`network_claim_link` children, or `offtopic_cluster` for
-   relevance-gate failures. Failures anywhere in the run are caught and recorded
-   as `DetectionRunStatus.FAILED`, never silently lost.
+   terms) plus real member-set Jaccard matching (≥`recurrence_threshold`, default
+   0.50) against prior *member* networks (comparison-role rows are excluded from
+   the match pool) sets `parent_network_id`.
+9. **Persistence** (`pipeline.py`) — `detection_run`, `coordinated_network` + its
+   `network_account` (member and comparison rows)/`network_edge`/
+   `network_evidence_post`/`network_burst_bin`/`network_claim_link` children, an
+   `evidence_snapshot` row, or `offtopic_cluster` for relevance-gate failures.
+   Failures anywhere in the run are caught and recorded as
+   `DetectionRunStatus.FAILED` with `error` set, never silently lost.
 
-## The one endpoint
+## The two endpoints
 
-`POST /coordination/detection-runs` (API-key gated) — the AI service's entire F5
-API surface, per the backend doc's ownership table ("a run-trigger endpoint").
+Matching `internal/aiclient/endpoints.go`'s `pathDetectionRun`/`pathDetectionPurge`
+exactly — **not** under `/coordination`, under `/detection`:
+
+### `POST /api/v1/detection/runs` (API-key gated)
 
 ```json
-{"claim_id": "<uuid> | null", "overrides": { /* optional, see below */ } | null}
+{
+  "claim_ids": ["<uuid>", "..."],
+  "trigger_source": "scheduled | velocity | on_demand",
+  "window_start": "<iso8601>", "window_end": "<iso8601>",
+  "parameters": { "window_days": 7, "beta_time": 0.30, "...": "the full detector config" },
+  "exclusions": {
+    "accounts": [{"platform": "...", "platform_account_id": "...", "handle": "..."}],
+    "phrases": ["..."]
+  }
+}
 ```
 
-- `claim_id` set → single-claim run. Covers what used to be two separate things
-  (an on-demand endpoint under `/claims/{id}/detect-network`, and an
-  automatic velocity-crossing trigger inside `POST /claims/rescore`) — both are
-  now just the backend calling this endpoint with a claim_id, whenever it decides
-  to (on-demand click, or its own velocity-crossing watch).
-- `claim_id` omitted/null → full sweep across every `Active` Existing claim
-  (replaces the old standalone scheduled-sweep endpoint). Also runs a housekeeping
-  evidence-retention purge first (see Governance below) — folded into the sweep
-  rather than its own endpoint, so this stays the *only* externally-triggered F5
-  route.
-- `overrides` — an optional partial map of the PRD 10.11 tunables for that run
-  only (see Configuration below). Response is always `202 {"claim_id": ..., "status":
-  "scheduled"}` — this is fire-and-forget (`BackgroundTasks`), same shape as F2
-  matchmaking; there's no synchronous 404 for a bad `claim_id` anymore, it's
-  silently skipped inside the background task.
+- `claim_ids` — always ≥1. The backend already rejects Non-Existing/Synthetic
+  claims itself (422) before calling us, and already decided *when* to call this
+  (all three PRD 10.5.8 trigger modes are its decision, recorded via
+  `trigger_source`) — this service just runs the pipeline.
+- `window_start`/`window_end` — computed by the backend, not this service.
+- `parameters` — the **full** detector configuration, every call. There is no
+  DB-backed config or partial-override concept left on this side.
+- `exclusions` — the declared-coordination allowlist and common-phrase list,
+  **sent inline**, not read from a shared table. (An earlier design had this
+  service read a `cis_coordination_allowlist` table directly; the backend's actual
+  contract sends the list with the request instead — simpler, and it means this
+  integration currently has *no* AI→`cis_*` table read at all.)
 
-All three PRD 10.5.8 trigger modes (scheduled/velocity/on-demand) are the
-backend's decision now — *when* to call this endpoint, and how often. This
-service just runs the pipeline when asked.
+Response: `202 {"run_id": "<uuid>", "status": "pending"}`, always — this is
+fire-and-forget. The `detection_run` row is written **synchronously**, before the
+202, so `run_id` is real and immediately queryable; the backend never polls, it
+reads `detection_run.status` directly as the pipeline updates it in the background.
+A `claim_id` that doesn't resolve (unknown, or not an Existing claim) is silently
+skipped inside that claim's iteration — no partial failure of the whole run.
+
+### `POST /api/v1/detection/snapshots/purge` (API-key gated)
+
+```json
+{"network_ids": ["<uuid>", "..."]}
+→ {"snapshots_purged": 12}
+```
+
+PRD 10.9.1 point 7's retention purge. The backend computes *which* networks are
+past retention — only it can see whether a report was generated from a network's
+snapshot (`cis_network_reports`), which is what makes the "except reported"
+exception possible — and hands over the list. This service just executes the
+deletion, since the rows are AI-owned (`governance.purge_expired_evidence`).
 
 ## Data model
 
-Exactly the 9 pipeline-output tables from the backend doc's ownership table
-(`app/models/coordination.py`) — nothing else:
+10 tables in `app/models/coordination.py`, names/columns matching
+`docs/sql/01_f5_reference_schema.sql` verbatim (table names are **singular**, PKs
+are table-specific, not a generic `id`):
 
-| Table | Purpose |
-|---|---|
-| `detection_runs` | One pipeline execution: window, full parameter set, status, truncation flag. |
-| `coordination_accounts` | Durable account identity (platform, platform_account_id, handle). |
-| `coordinated_networks` | A detected, surfaced network: scores, confidence band, graph layout, fingerprint/parent for recurrence. No review-status field — that lives on the backend's side now (it can't write into this AI-owned table). |
-| `network_accounts` | Per-network membership + this account's contribution stats (centrality, duplication rate, etc.). |
-| `network_edges` | Retained pairwise edges with full per-signal decomposition. |
-| `network_evidence_posts` | Immutable captured post content + SHA-256, duplicate-group membership. |
-| `network_burst_bins` | Per-bin post-volume series backing the burst-timeline chart. |
-| `network_claim_links` | Many-to-many network↔claim with `overlap_ratio`/`anchoring_share`/`is_primary_claim`. |
-| `offtopic_clusters` | Real coordinated clusters that failed the relevance gate — never surfaced, kept for recalibration review. |
+| Table | PK | Purpose |
+|---|---|---|
+| `detection_run` | `run_id` | One pipeline execution: scope, trigger source, window, full parameter set, status, error. |
+| `account` | `account_id` | Durable account identity — platform, platform_account_id (unique together), handle, created_at_platform, profile_hash, bio, declared_location, client_app. |
+| `coordinated_network` | `network_id` | A detected network: scores, raw_counts, confidence band, comparison_account_count, fingerprint/parent for recurrence, allowlist_suppressed, relabelled. No review_status — backend-owned overlay. |
+| `network_account` | `(network_id, account_id)` | Per-network membership (`membership_role` = member \| comparison) + contribution stats + `layout_x`/`layout_y`. |
+| `network_edge` | `(network_id, account_a, account_b)` | Retained pairwise edges with full per-signal decomposition. No surrogate id. |
+| `network_evidence_post` | `evidence_id` | Immutable captured post content + SHA-256, `posted_at`/`captured_at`, duplicate-group uuid, shared-span offsets (nullable, not yet populated). |
+| `network_burst_bin` | `(network_id, bin_start)` | Per-bin post-volume series. No surrogate id. |
+| `network_claim_link` | `(network_id, claim_id)` | Many-to-many network↔claim with `overlap_ratio`/`anchoring_share`/`is_primary_claim`. |
+| `offtopic_cluster` | `cluster_id` | Real coordinated clusters that failed the relevance gate — never surfaced, kept for recalibration review. |
+| `evidence_snapshot` | `snapshot_id` | One row per network: a hash + count for the PDF report's chain-of-custody section, `expires_at` for retention. |
 
-**Moved to the backend** (no longer in this service at all): the review-log
-table, the allowlist table (see below — the AI now *reads* the backend's copy),
-generated PDF/ZIP reports, the export audit log, and the F4 config table. Exact
-names on the backend side are the backend team's call.
-
-**The one shared-table read** (the integration doc's explicit, sole exception to
-"no shared-table access"): `pipeline._load_allowlisted_handles()` reads the
-backend-owned `cis_coordination_allowlist` table directly (read-only) before
-candidate selection, so declared-legitimate coordination (US56/US63) still gets
-excluded. **The column names assumed there (`handle`, `removed_at`) are a
-placeholder pending confirmation of the backend's actual DDL** — the integration
-doc names the table but not its schema. Reconcile before this reads real data.
+**Moved to the backend** (not in this service at all): the review-log table, the
+allowlist table, generated PDF/ZIP reports, the export audit log, the F4 config
+table. Exact names on the backend side (`cis_*`) are the backend team's own.
 
 ## Configuration
 
-All PRD 10.11 tunables are now static defaults in `app/core/config.py`
-(`COORDINATION_*`), overridable per-run via the trigger endpoint's `overrides`
-field. F4's old DB-backed `CoordinationSettings` singleton and its admin
-CRUD endpoints moved to the backend along with the rest of F5 config ownership —
-there's no persistent per-deployment override left on this side; a caller wanting
-non-default parameters must pass them explicitly on every call.
-
-| Setting | Default |
-|---|---|
-| `COORDINATION_MULTILINGUAL_MODEL_NAME` | `paraphrase-multilingual-MiniLM-L12-v2` |
-| `COORDINATION_DEFAULT_WINDOW_HOURS` | `168.0` |
-| `COORDINATION_A_MAX` | `5000` |
-| `COORDINATION_THETA_EDGE` | `0.35` |
-| `COORDINATION_K_CORE` | `3` |
-| `COORDINATION_LEIDEN_RESOLUTION` | `1.0` |
-| `COORDINATION_N_MIN` | `5` |
-| `COORDINATION_RHO_MIN` | `0.30` |
-| `COORDINATION_MU_ANCHOR` | `0.60` |
-| `COORDINATION_P_MIN` | `20` |
-| `COORDINATION_OMEGA_MIN` | `0.15` |
-| `COORDINATION_BIN_WIDTH_SECONDS` | `60` |
-| `COORDINATION_NULL_MODEL_ALPHA` | `0.01` |
-| `COORDINATION_TAU_DUP` | `0.80` |
-| `COORDINATION_TAU_SEM` | `0.90` |
-| `COORDINATION_L_MIN` | `25` |
-| `COORDINATION_PROVENANCE_HALF_LIFE_HOURS` | `36.0` |
-| `COORDINATION_SELF_EXCLUSION_HANDLES` | `[]` |
-
-Every `detection_run.parameters` row still records the exact values in force for
-that run (defaults + any overrides applied), so a report generated months later
-can state the configuration that produced it — this didn't change.
-
-**Still compile-time-only, no override path at all** (unchanged from before):
-confidence-band score/breadth cutoffs and the allowlist-majority-suppression
-threshold (`app/services/coordination/confidence.py`), the multi-signal-rule
-constants (`app/services/coordination/fusion.py`).
+All PRD 10.11 tunables — plus confidence-band cutoffs and `min_signal_families`,
+which are backend-configurable too now — are sent in full on every
+`POST /api/v1/detection/runs` call (`DetectorParameters`,
+`app/schemas/coordination_network.py`). There is no static default, DB-backed
+config, or per-run override concept on this side; the backend's own
+`CISDetectorSettings.Validate()` guarantees a complete, cross-field-valid object
+(fusion weights sum to 1.00, confidence-band ordering, cadence ≤ window/2) before
+it's ever sent. Every `detection_run.parameters` row records the exact values in
+force for that run, so a report generated months later can state the configuration
+that produced it.
 
 ## Governance (PRD 10.9)
 
@@ -218,7 +219,7 @@ constants (`app/services/coordination/fusion.py`).
   rendered against a single account.
 - **Standing disclaimer** — moved with the report/detail rendering to the
   backend, which must reproduce this text verbatim on its own report and
-  network-detail pages (PRD 10.9.2, previously `governance.STANDING_DISCLAIMER`):
+  network-detail pages (PRD 10.9.2):
 
   > This report documents statistical patterns in publicly available account
   > behaviour – the timing, duplication, and provenance characteristics of a set
@@ -230,53 +231,49 @@ constants (`app/services/coordination/fusion.py`).
   > in response to real events. Findings require human assessment before any
   > action is taken.
 
-- **Minimum-necessary retention** — `governance.purge_expired_evidence` deletes
-  evidence artifacts (posts, burst bins, edges, membership) for networks older
-  than the retention window (default 24 months); the `coordinated_network` audit
-  row itself is kept permanently. Runs automatically at the start of every
-  scheduled sweep — **not** exposed as its own endpoint (folded in so the AI
-  service still exposes exactly one F5 route), and **no longer skips reported
-  networks** — "reported" status lives in the backend's tables now, invisible to
-  this service under "no shared-table writes." This is a deliberate change from
-  the original PRD 10.9.1 point 7 wording; worth surfacing to the backend team
-  since they're the ones tracking report status.
+- **Minimum-necessary retention** — `governance.purge_expired_evidence(db,
+  network_ids)` deletes evidence artifacts (posts, burst bins, edges, membership)
+  and the `evidence_snapshot` row for exactly the networks the backend names;
+  `coordinated_network` itself is kept permanently. The "except reported"
+  exception (PRD 10.9.1 point 7) is preserved — computed on the backend's side
+  (it alone can see `cis_network_reports`), not lost the way an earlier
+  age-based-only design would have lost it.
 
 ## Known gaps (documented, not silently dropped)
 
-See `AI_INTEGRATION_RESPONSE_V1.md` (in the shared `documentation/CIS` repo) for the
-full account of these gaps against the backend's own "minimum ask" schema list
-(their integration doc's G1) — this section is the short version.
-
-- **`w_time` (temporal synchrony) runs on ingest time, not publish time** —
-  `ContentItem.created_at` is when this service ingested the post, not when it was
-  actually posted; there's no separate `posted_at` field yet. Ingestion lag can
-  smear or fabricate apparent synchrony. Flagged by the backend's own integration
-  doc (their G1, point 1) as load-bearing for every temporal signal — not yet fixed.
+- **`network_evidence_post.posted_at` is backfilled from `ContentItem.created_at`
+  (ingest time)**, not real publish time — `content_items` has no separate
+  `posted_at` column yet. Flagged by the backend's own gap analysis as
+  load-bearing for every temporal signal (their "G1 point 1"); still open.
 - **`w_amp` (co-amplification) is effectively empty** — `ContentItem` carries no
-  reshare/quote/reply/outbound-link fields yet, so there's nothing for this
-  signal to compute over until ingestion captures them.
-- **`w_meta`/`PR` run on handle-and-timing data only** — no ingestion path
-  populates `Account.bio`/`declared_location`/`client_app` yet (backend's minimum
-  ask); `created_at_platform`/`profile_hash` are the only fields currently populated.
+  reshare/quote/reply/outbound-link fields yet.
+- **`w_meta`/`PR` run on a subset of their stated inputs** — no ingestion path
+  populates `Account.bio`/`declared_location`/`client_app` yet (the columns exist,
+  per the backend's schema; nothing writes them). Only `created_at_platform`/
+  `profile_hash` are currently populated.
 - **`w_struct` is always unavailable** — no follower-graph data source exists.
-  All four degrade honestly (`None`/unavailable or running on partial data, never
-  faked as complete) rather than being worked around. Per the backend's own
-  analysis, three of five signal families being degraded caps every detected
-  network at Medium confidence regardless of score — a real, currently-open
-  consequence, not a hypothetical one.
-- **Recurrence count (if the backend surfaces one) should use exact
-  `fingerprint_hash` matching as a display proxy**, not a full traversal of the
-  fuzzy-Jaccard `parent_network_id` chain — the underlying recurrence
-  *detection* (which does use real Jaccard matching) is unaffected either way.
-- **`NetworkAccount.score_contribution`** (per-metric contribution breakdown,
-  not just aggregate stats) is `{}` — a future refinement.
-- **`cis_coordination_allowlist` column names are an assumption** (see Data
-  model above) — needs backend DDL confirmation.
-- **The run-trigger endpoint's exact contract is this service's own design
-  choice**, not something the integration doc specifies — it only says "a
-  run-trigger endpoint" without a shape. Worth confirming with the backend team
-  that `POST /coordination/detection-runs`'s `{claim_id, overrides}` body matches
-  what they intend to call.
+  All degrade honestly (`None`/unavailable or partial, never faked as complete).
+  Per the backend's analysis, this caps every detected network at Medium
+  confidence regardless of score — a real, currently-open consequence.
+- **`shared_span_start`/`shared_span_end` are always `None`** — computing exactly
+  where two near-duplicate posts overlap (for report/UI highlighting) needs a
+  text-diff step this pipeline doesn't do yet; the columns exist, scoped as a
+  follow-up.
+- **`raw_counts_json` is a representative count per metric, not exhaustive** — SY/
+  DU/PR reduce cleanly to a numerator/total; AU averages four per-account
+  sub-signals and reports the cluster's combined circadian coverage as a stand-in,
+  not a literal breakdown of all four.
+- **`coordinated_network.relabelled` is never set** — see the open question to
+  the backend team (`AI_INTEGRATION_RESPONSE_V1.md`) about how this is supposed
+  to get triggered given neither side can write it after the fact under
+  "no shared-table writes."
+- **`network_edge`'s signal-weight columns are `NOT NULL DEFAULT 0`**, so an
+  unavailable family is stored as `0.0` on a per-edge basis — `detection_run.
+  signals_unavailable` is the actual source of truth for unavailability at the
+  run level. Also an open question to the backend team.
+- **Comparison accounts (`membership_role="comparison"`) aren't positioned in the
+  graph layout** — `layout_x`/`layout_y` are `None` for them; only real cluster
+  members get a computed position today.
 
 ## Testing
 
@@ -287,10 +284,11 @@ confidence), `tests/unit/test_coordination_evidence.py`.
 
 Integration tests (`tests/integration/`, `@pytest.mark.integration`, need a live
 test Postgres) exercise the full HTTP path end to end against a synthetic
-coordinated cluster: `test_coordination_pipeline_e2e.py` (single-claim run via
-the unified trigger endpoint), `test_coordination_triggers.py` (sweep via the
-same endpoint with no `claim_id`), `test_coordination_governance.py` (retention
-purge).
+coordinated cluster, using the shared request-builder in
+`tests/coordination_fixtures.py`: `test_coordination_pipeline_e2e.py`
+(single-claim run), `test_coordination_triggers.py` (multi-claim batch runs, one
+`detection_run` covering several claims), `test_coordination_governance.py`
+(network-id-driven purge).
 
 Notable regression coverage: the multi-signal rule (a single signal at maximum
 strength can never form an edge alone —

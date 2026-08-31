@@ -1,49 +1,104 @@
-"""F5 (PRD Section 10) request/response schemas for the AI service's one remaining
-F5 endpoint - POST /coordination/detection-runs. Everything else (network list/detail,
-review, allowlist, reports, F4 config schemas) moved to the backend along with the
-endpoints that used them - see docs/COORDINATION.md."""
+"""F5 (PRD Section 10) request/response schemas for the AI service's two F5
+endpoints - POST /api/v1/detection/runs and POST /api/v1/detection/snapshots/purge.
+Field names mirror the backend's actual reference contract verbatim
+(CIS-Backend internal/aiclient/detection.go DetectionRunRequest,
+internal/models/f5_detector_settings.go CISDetectorSettings) - not a guess, pulled
+and reviewed from their merged code this session. See docs/COORDINATION.md."""
 
 import uuid
+from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 
-class DetectionRunOverrides(BaseModel):
-    """Optional per-run parameter overrides (PRD 10.11's ~15 tunables). Defaults live
-    in app.core.config.settings.COORDINATION_* - F4's DB-backed CoordinationSettings
-    moved to the backend along with the rest of F5 config ownership, so this is the
-    only way left to change a parameter for a given run; omitted fields fall back to
-    the static defaults."""
+class DetectorParameters(BaseModel):
+    """The full detector configuration in force for this run - PRD 10.11's ~19
+    tunables plus confidence-band cutoffs and the multi-signal rule's family count,
+    all backend-configurable now (F4 config lives entirely on their side). Sent in
+    full on every request - no partial-override concept; the backend's own
+    CISDetectorSettings.Validate() guarantees a complete, cross-field-valid object
+    before it's ever sent."""
 
-    window_hours: float | None = Field(default=None, gt=0)
-    a_max: int | None = Field(default=None, ge=1)
-    theta_edge: float | None = Field(default=None, ge=0, le=1)
-    k_core: int | None = Field(default=None, ge=1)
-    leiden_resolution: float | None = Field(default=None, gt=0)
-    n_min: int | None = Field(default=None, ge=1)
-    rho_min: float | None = Field(default=None, ge=0, le=1)
-    mu_anchor: float | None = Field(default=None, ge=0, le=1)
-    p_min: int | None = Field(default=None, ge=0)
-    omega_min: float | None = Field(default=None, ge=0, le=1)
-    bin_width_seconds: int | None = Field(default=None, ge=1)
-    null_model_alpha: float | None = Field(default=None, gt=0, lt=1)
-    tau_dup: float | None = Field(default=None, ge=0, le=1)
-    tau_sem: float | None = Field(default=None, ge=0, le=1)
-    l_min: int | None = Field(default=None, ge=0)
-    provenance_half_life_hours: float | None = Field(default=None, gt=0)
-    self_exclusion_handles: list[str] | None = None
+    window_days: int
+    bin_width_seconds: int
+    null_model_alpha: float
+    dup_threshold: float
+    sem_threshold: float
+    min_post_length: int
+    edge_threshold: float
+    min_signal_families: int
+    k_core: int
+    leiden_resolution: float
+    min_cluster_size: int
+    min_internal_density: float
+    beta_time: float
+    beta_text: float
+    beta_amp: float
+    beta_meta: float
+    beta_struct: float
+    provenance_half_life_hours: float
+    anchor_share: float
+    min_claim_posts: int
+    min_link_strength: float
+    high_score_cutoff: float
+    high_breadth_cutoff: int
+    medium_score_cutoff: float
+    medium_breadth_cutoff: int
+    cadence_hours: int
+    candidate_cap: int
+    recurrence_threshold: float
+    velocity_trigger_threshold: float
 
 
-class DetectionRunTriggerRequest(BaseModel):
-    """claim_id set -> single-claim run (covers what used to be the on-demand and
-    velocity-triggered calls). claim_id omitted -> full sweep across every Active
-    claim (covers the old scheduled trigger). All three PRD 10.5.8 trigger modes are
-    now the backend's decision (when to call this, and with which shape), not ours."""
+class ExclusionAccount(BaseModel):
+    """One declared-legitimate account (US56/US63) - the backend's allowlist,
+    travelling with the request rather than read from a shared table."""
 
-    claim_id: uuid.UUID | None = None
-    overrides: DetectionRunOverrides | None = None
+    platform: str
+    platform_account_id: str
+    handle: str
 
 
-class DetectionRunTriggerResponse(BaseModel):
-    claim_id: uuid.UUID | None
+class Exclusions(BaseModel):
+    """The declared-coordination allowlist and the common-phrase list - both
+    backend-owned, pipeline-read. This is the one place the read direction between
+    the two services reverses, and it travels with the request rather than being a
+    table this service reads directly."""
+
+    accounts: list[ExclusionAccount] = Field(default_factory=list)
+    phrases: list[str] = Field(default_factory=list)
+
+
+class DetectionRunRequest(BaseModel):
+    """POST /api/v1/detection/runs. The backend computes window_start/window_end
+    itself (enforces PRD 10.5.1's 50%-overlap rule via its own cross-field
+    validation) and already rejects Non-Existing/Synthetic claim_ids with 422 before
+    calling us."""
+
+    claim_ids: list[uuid.UUID] = Field(min_length=1)
+    trigger_source: Literal["scheduled", "velocity", "on_demand"]
+    window_start: datetime
+    window_end: datetime
+    parameters: DetectorParameters
+    exclusions: Exclusions = Field(default_factory=Exclusions)
+
+
+class DetectionRunResponse(BaseModel):
+    """Acknowledgement only - the backend never polls, it reads detection_run
+    directly."""
+
+    run_id: uuid.UUID
     status: str
+
+
+class PurgeSnapshotsRequest(BaseModel):
+    """POST /api/v1/detection/snapshots/purge. The backend computes which networks
+    are past retention (it alone can see whether a report was generated from a
+    snapshot) and hands over the list; the rows are AI-owned, so deletion is ours."""
+
+    network_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class PurgeSnapshotsResponse(BaseModel):
+    snapshots_purged: int

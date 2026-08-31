@@ -6,6 +6,7 @@ and a report that cannot show its own evidence is worthless."""
 import hashlib
 import logging
 import math
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -42,7 +43,7 @@ class EvidencePost:
     captured_text: str
     posted_at: datetime
     content_sha256: str
-    duplicate_group_id: str | None
+    duplicate_group_id: uuid.UUID | None
     is_canonical: bool
 
 
@@ -119,13 +120,16 @@ def build_burst_timeline(
 def build_representative_content(
     cluster_posts: list[SignalPost],
     embedder: MultilingualEmbeddingService | None = None,
+    common_phrase_allowlist: set[str] | None = None,
 ) -> list[EvidencePost]:
     """Groups duplicate posts into connected components via union-find over the
     pairwise duplicate flags (2a/2b); the earliest post in each group is canonical.
     Every post is captured with its SHA-256 regardless of group membership, so a
     later-deleted post still has durable evidence (US54)."""
     embedder = embedder or get_multilingual_embedding_service()
-    eligible, duplicate_pairs = find_duplicate_post_pairs(cluster_posts, embedder=embedder)
+    eligible, duplicate_pairs = find_duplicate_post_pairs(
+        cluster_posts, common_phrase_allowlist=common_phrase_allowlist, embedder=embedder
+    )
 
     parent = list(range(len(eligible)))
 
@@ -147,13 +151,16 @@ def build_representative_content(
     for idx in range(len(eligible)):
         groups[find(idx)].append(idx)
 
-    duplicate_group_by_post_id: dict[str, str] = {}
+    duplicate_group_by_post_id: dict[str, uuid.UUID] = {}
     canonical_post_ids: set[str] = set()
     for members in groups.values():
         if len(members) < 2:
             continue
         member_posts = [eligible[m] for m in members]
-        group_id = _sha256("|".join(sorted(p.id for p in member_posts)))[:16]
+        # Deterministic UUID (uuid5, not uuid4) so the same duplicate set produces
+        # the same group id across regenerations - the backend's schema requires a
+        # real uuid column here, not the truncated sha256 string this used to be.
+        group_id = uuid.uuid5(uuid.NAMESPACE_OID, "|".join(sorted(p.id for p in member_posts)))
         canonical = min(member_posts, key=lambda p: p.created_at)
         canonical_post_ids.add(canonical.id)
         for p in member_posts:
@@ -286,9 +293,12 @@ def build_evidence_snapshot(
     accounts: list[SignalAccount],
     edges: list[FusedEdge],
     embedder: MultilingualEmbeddingService | None = None,
+    common_phrase_allowlist: set[str] | None = None,
 ) -> EvidenceSnapshot:
     embedder = embedder or get_multilingual_embedding_service()
-    representative_content = build_representative_content(cluster_posts, embedder=embedder)
+    representative_content = build_representative_content(
+        cluster_posts, embedder=embedder, common_phrase_allowlist=common_phrase_allowlist
+    )
     duplication_rates = _duplication_rate_by_account(cluster_posts, representative_content)
 
     return EvidenceSnapshot(
