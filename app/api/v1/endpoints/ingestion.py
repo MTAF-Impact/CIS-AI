@@ -1,11 +1,11 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.concurrency import run_in_threadpool
 
-from app.core.database import get_db
+from app.core.database import get_db, get_session_factory
 from app.models.content import ContentItem
 from app.schemas.content import (
     ContentItemBatchCreate,
@@ -15,7 +15,10 @@ from app.schemas.content import (
     SyntheticIngestRequest,
     SyntheticIngestResult,
 )
-from app.services.clustering_service import cluster_unclustered_content
+from app.services.clustering_service import (
+    cluster_unclustered_content,
+    cluster_unclustered_content_task,
+)
 from app.services.content_ingestion_service import (
     analyze_and_build_item,
     build_grounding_context,
@@ -35,11 +38,17 @@ router = APIRouter(prefix="/ingest", tags=["ingestion"])
 @router.post("", response_model=ContentItemRead, status_code=201)
 async def ingest_content(
     payload: ContentItemCreate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     llm: LLMClient = Depends(get_llm_client),
     embedder: EmbeddingService = Depends(get_embedding_service),
+    session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> ContentItem:
-    """Ingest a single piece of content: embed it, classify it via OpenAI, persist it."""
+    """Ingest a single piece of content: embed it, classify it via OpenAI, persist it.
+    This is the endpoint an upstream crawler/scheduler will eventually call, so
+    clustering is kicked off automatically in the background afterward - the same
+    "no separate manual step" pattern as F2's AI matchmaking pipeline running
+    automatically after a Policy is created."""
     embedding = await run_in_threadpool(embedder.embed, payload.text)
     try:
         item = await analyze_and_build_item(payload, llm, embedding)
@@ -49,17 +58,21 @@ async def ingest_content(
     db.add(item)
     await db.commit()
     await db.refresh(item)
+    background_tasks.add_task(cluster_unclustered_content_task, session_factory=session_factory)
     return item
 
 
 @router.post("/batch", response_model=ContentItemBatchResult, status_code=201)
 async def ingest_content_batch(
     payload: ContentItemBatchCreate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     llm: LLMClient = Depends(get_llm_client),
     embedder: EmbeddingService = Depends(get_embedding_service),
+    session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> ContentItemBatchResult:
-    """Ingest multiple content items in one call: batch-embed, then classify concurrently."""
+    """Ingest multiple content items in one call: batch-embed, then classify
+    concurrently. See ingest_content's docstring for why clustering is auto-triggered."""
     texts = [entry.text for entry in payload.items]
     embeddings = await run_in_threadpool(embedder.embed_batch, texts)
 
@@ -87,6 +100,7 @@ async def ingest_content_batch(
         await db.commit()
         for item in created:
             await db.refresh(item)
+        background_tasks.add_task(cluster_unclustered_content_task, session_factory=session_factory)
 
     return ContentItemBatchResult(created=created, failed=failed)
 

@@ -14,8 +14,9 @@ from datetime import UTC, datetime, timedelta
 import hdbscan
 import numpy as np
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.database import get_session_factory
 from app.models.alert import ClaimScoreSnapshot
 from app.models.claim import Claim
 from app.models.content import ContentItem
@@ -514,3 +515,31 @@ async def cluster_unclustered_content(
         claims_updated=len(claims_to_rescore) - claims_created,
         content_items_clustered=total_clustered,
     )
+
+
+async def cluster_unclustered_content_task(
+    llm: LLMClient | None = None,
+    embedder: EmbeddingService | None = None,
+    session_factory: async_sessionmaker | None = None,
+) -> None:
+    """Fire-and-forget wrapper for FastAPI BackgroundTasks - see app.api.v1.endpoints.
+    ingestion. Ingestion (POST /ingest, /ingest/batch) is meant to be hit repeatedly by
+    an upstream crawler/scheduler, so clustering must run automatically as a side effect
+    of ingesting content, the same way F2's AI matchmaking pipeline runs automatically
+    after a Policy is created - never a separate manual step. Opens its own AsyncSession
+    since the request that triggered this has already returned and its request-scoped
+    session is closed by the time this runs (same reasoning as
+    policy_matchmaking_service.match_and_predict_claims_for_policy)."""
+    session_factory = session_factory or get_session_factory()
+    async with session_factory() as db:
+        try:
+            result = await cluster_unclustered_content(db, llm=llm, embedder=embedder)
+            logger.info(
+                "Background clustering complete: %d claims created, %d updated, "
+                "%d items clustered",
+                result.claims_created,
+                result.claims_updated,
+                result.content_items_clustered,
+            )
+        except Exception:
+            logger.exception("Background clustering pass failed")

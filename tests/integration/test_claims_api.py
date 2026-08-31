@@ -20,11 +20,17 @@ async def _ingest(client, texts, location="Sudirman"):
 
 
 async def _seed_two_claims(client):
+    # Ingestion auto-triggers clustering in the background (see ingestion.py), so items
+    # may already be clustered by the time we get here - the explicit call is just a
+    # safety net (a no-op if nothing is left unclustered). Assert on final state via GET
+    # rather than this call's own claims_created, since that count depends on exactly
+    # when the background passes ran, not just on this one.
     await _ingest(client, ERP_POSTS)
     await _ingest(client, TREE_REMOVAL_POSTS, location="Monas")
     cluster_response = await client.post("/api/v1/claims/cluster-now")
     assert cluster_response.status_code == 200
-    assert cluster_response.json()["claims_created"] == 2
+    existing = await client.get("/api/v1/claims/existing")
+    assert existing.json()["total"] == 2
 
 
 async def _seed_policy(db_session, **overrides) -> Policy:
