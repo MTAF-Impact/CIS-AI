@@ -23,7 +23,8 @@ backend's exclusive territory (`cis_users`, `cis_refresh_tokens`, `cis_policies`
 `cis_claim_reviews`, `cis_claim_alerts`, `cis_claim_score_snapshots`, `cis_settings`).
 `scripts/reset_schema.py` explicitly excludes anything prefixed `cis_` from its drop
 step for exactly this reason. See `GO_INTEGRATION.md` for the full ownership contract
-and the 3 HTTP touchpoints that replace direct table access between the two services.
+and the HTTP touchpoints that replace direct table access between the two services (8
+endpoints the backend calls on this service, 2 in the reverse direction, as of that doc).
 
 All tables live in the same Supabase Postgres instance, `public` schema, with the
 `vector` extension enabled (pgvector, for the `embedding` columns).
@@ -84,7 +85,8 @@ not by a DB constraint.
 **Relationships:** `topic` (many-to-one), `policy` (many-to-one, `non_existing` only),
 `policy_links` (one-to-many `ClaimPolicy`, `existing` only), `content_items`
 (one-to-many, `existing` only — `non_existing` claims have zero attached content by
-construction).
+construction), `debunk_segments` (one-to-many `ClaimDebunkSegment`, `existing` only —
+see below).
 
 ---
 
@@ -105,6 +107,7 @@ transcript excerpt). See `app/models/content.py`.
 | `moral_foundation` | `varchar(32)` | Yes | `NULL` | `fairness` \| `harm` \| `autonomy` \| `loyalty` \| `authority` \| `purity` \| `neutral`. LLM-assessed at ingestion. |
 | `extracted_claim` | `text` | Yes | `NULL` | LLM's one-sentence summary of the core claim in this specific post (distinct from the claim cluster's own synthesized `claim_statement`). |
 | `underlying_grievance` | `text` | Yes | `NULL` | LLM's short phrase for the deeper community concern this content taps into. |
+| `sentiment` | `varchar(16)` | Yes | `NULL` | `positive` \| `negative` \| `neutral` (PRD v1.5 6.6.1). LLM-assessed at ingestion, on the content's own emotional valence — **not** derived from `stance`; see `Sentiment`'s docstring in `app/models/enums.py` for why the two axes must never be conflated. `NULL` only for rows ingested before this shipped; still counts toward F6's Climate Sentiment Index denominator. |
 | `stance` | `varchar(16)` | Yes | `NULL` | `supporting` \| `opposing` \| `neutral`. **`NULL` until the item is clustered into a claim** — stance is only assessable relative to a specific claim statement, so it is never set at ingestion time, and never defaulted (always an explicit LLM call). |
 | `impressions` | `integer` | Yes | `NULL` | Optional raw metric, feeds Reach (R). Populated by whatever upstream source provides it; `NULL`/absent is fine. |
 | `positive_reaction_count` | `integer` | Yes | `NULL` | Optional raw metric, feeds Emotional Intensity (EI). |
@@ -223,6 +226,39 @@ not just alerted ones, since scoring itself doesn't know which claims are watchl
 
 ---
 
+## `claim_debunk_segments`
+
+PRD v1.5 US12. One tailored Debunk Activity draft per audience segment, replacing the
+single generic draft (`claims.activity_content`) with 1–4 segment-specific ones.
+Generated once, alongside `activity_content`, from the claim's Supporting-side sample —
+never regenerated on view, same rule as `activity_content` itself. See
+`app/models/debunk_segment.py`.
+
+| Column | Type | Nullable | Default | Notes |
+|---|---|---|---|---|
+| `id` | `uuid` | No | `uuid4()` | |
+| `claim_id` | `uuid` | No | — | FK → `claims.id`, `ON DELETE CASCADE`. |
+| `segment_name` | `varchar(255)` | No | — | Card label, e.g. `"Commuters"`. LLM-inferred from the sample of posts spreading the claim. |
+| `segment_rationale` | `text` | Yes | `NULL` | Why this segment is exposed / what framing makes the claim land differently for them. Rendered as the card's subtitle. |
+| `content` | `text` | No | — | The tailored corrective message for this segment, following the same Truth Sandwich discipline as `activity_content`. |
+| `rank` | `integer` | No | `0` | Card order, most-exposed segment first — the LLM response's own ordering, deduped (see below), not re-sorted. |
+| `generated_at` | `timestamptz` | No | `now()` | |
+
+**Unique constraint** `(claim_id, segment_name)` — matches the backend's proposed DDL
+(`CIS-Backend/docs/sql/02_f6_reference_schema.sql`) exactly, since this schema is that
+proposal, adopted as-is. `activity_service._generate_debunk_segments` dedupes on
+`segment_name` **before** inserting: the LLM's "distinct segments" instruction is a
+prompt-level ask, not a guarantee, and a repeated name would otherwise only surface as an
+`IntegrityError` at the caller's eventual commit — for clustering's Pass 2, one
+transaction shared by every claim created in that run, so one naming collision would roll
+back claims that have nothing to do with it.
+
+**Optional by construction, from the backend's side:** an empty result set for a claim
+falls back to `activity_content` exactly as PRD v1.4 behaved. A generation failure here
+(caught in `activity_service`) never blocks or invalidates the generic draft above it.
+
+---
+
 ## `admin_settings`
 
 F4's single global config row. Not a key-value table — there is currently only one
@@ -304,6 +340,7 @@ value never requires a migration — just a new string constant.
 |---|---|---|
 | `ContentSource` | `social`, `rss`, `radio`, `forum`, `other` | `content_items.source` |
 | `MoralFoundation` | `fairness`, `harm`, `autonomy`, `loyalty`, `authority`, `purity`, `neutral` | `content_items.moral_foundation` |
+| `Sentiment` | `positive`, `negative`, `neutral` | `content_items.sentiment` — independent axis from `Stance`, never derived from it. |
 | `Stance` | `supporting`, `opposing`, `neutral` | `content_items.stance` |
 | `ClaimType` | `existing`, `non_existing` | `claims.claim_type` — matches the Go backend's canonical vocabulary exactly (see `GO_INTEGRATION.md`'s alias table). |
 | `ClaimStatus` | `unreviewed`, `active`, `inactive`, `action_taken` | `claims.status` |
@@ -334,6 +371,7 @@ value never requires a migration — just a new string constant.
 
    claims 1───* claim_alerts (existing only, PK = claim_id)
    claims 1───* claim_score_snapshots
+   claims 1───* claim_debunk_segments (existing only)
    topics 1───* topic_volume_buckets
 ```
 

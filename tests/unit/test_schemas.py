@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from app.models.enums import ContentSource, MoralFoundation
+from app.models.enums import ContentSource, MoralFoundation, Sentiment
 from app.schemas.analysis import ContentAnalysisSchema
 from app.schemas.content import ContentItemBatchCreate, ContentItemCreate
 from app.schemas.coordination import CIBCheckPost, CIBCheckRequest
@@ -16,6 +16,7 @@ class TestContentAnalysisSchema:
             moral_foundation=MoralFoundation.FAIRNESS,
             extracted_claim="claim",
             underlying_grievance="grievance",
+            sentiment=Sentiment.NEUTRAL,
             text_en="claim text",
         )
         assert schema.outrage_score == 0.5
@@ -28,6 +29,7 @@ class TestContentAnalysisSchema:
                 moral_foundation=MoralFoundation.NEUTRAL,
                 extracted_claim="claim",
                 underlying_grievance="grievance",
+                sentiment=Sentiment.NEUTRAL,
                 text_en="claim text",
             )
 
@@ -38,6 +40,7 @@ class TestContentAnalysisSchema:
                 moral_foundation="not_a_real_moral_foundation",
                 extracted_claim="claim",
                 underlying_grievance="grievance",
+                sentiment=Sentiment.NEUTRAL,
                 text_en="claim text",
             )
 

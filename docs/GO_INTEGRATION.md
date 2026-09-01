@@ -8,7 +8,10 @@ code locations, error handling, retry/idempotency guarantees, and config.
 ## The model, restated
 
 **The shared Supabase Postgres database is never a write-surface between the two
-services — coordination happens exclusively over 3 HTTP calls.**
+services — coordination happens exclusively over HTTP.** That HTTP surface has grown
+past this diagram's original "3 calls" framing as F4/F5/v1.5 landed; see the touchpoint
+table right after it for the current, accurate count (8 backend → AI endpoints, 2 AI →
+backend callbacks, plus the health probe).
 
 ```
                       ┌──────────────────────┐
@@ -36,10 +39,32 @@ services — coordination happens exclusively over 3 HTTP calls.**
                       ┌──────────────────────┐
    frontend ◀────────▶│   Go backend          │
                       └──────────┬───────────┘
-                                 │ the only 3 HTTP calls between the services
+                                 │ every touchpoint below - no other channel
                                  ▼
                           this AI service
 ```
+
+### Every touchpoint, current as of this doc
+
+| # | Flow | Direction | Endpoint |
+|---|---|---|---|
+| 1 | Policy matchmaking (US42) | Backend → AI | `POST /api/v1/matchmaking/policies` |
+| 2 | Matchmaking result | AI → Backend | `POST {BACKEND_URL}/.../matchmaking-result` (callback) |
+| 3 | Generate Generic Claim (US33) | Backend → AI | `POST /api/v1/claims/generate-generic` |
+| 4 | Harm confirmation | Backend → AI | `PATCH /api/v1/claims/{id}/harm/confirm` |
+| 5 | Score re-evaluation | Backend → AI | `POST /api/v1/claims/rescore` |
+| 6 | Sample content generation | Backend → AI | `POST /api/v1/ingest/generate-synthetic` |
+| 6b | Cluster now | Backend → AI | `POST /api/v1/claims/cluster-now` |
+| 7 | Detection run (F5) | Backend → AI | `POST /api/v1/detection/runs` |
+| 8 | Evidence snapshot purge (F5) | Backend → AI | `POST /api/v1/detection/snapshots/purge` |
+| — | Exclusion lists (F5), optional pull | AI → Backend | `GET {BACKEND_URL}/api/v1/internal/detection/exclusions` — the exclusions already travel inline on Flow 7's request body, so this is a fallback, not a mandatory call |
+| — | Health probe | Backend → AI | `GET /health` |
+
+Numbering matches the backend's own `docs/AI-INTEGRATION.md` flow table exactly, so a
+flow number means the same thing in either repo. **8 endpoints the backend calls on this
+service, 1 callback this service calls back on the backend, 1 optional pull in the same
+reverse direction, plus the health probe** — not the "3" (nor the later "5") this doc
+used to say before Flow 4/5/6/6b and F5's two endpoints were folded into the table above.
 
 **This service owns and exclusively writes:** `claims`, `content_items`, `topics`,
 `policies`, `claim_policies`, `topic_volume_buckets`, `fault_lines`, `official_sources`.
@@ -252,6 +277,113 @@ not part of the Go contract).
 
 ---
 
+## Flow 4 — Harm confirmation
+
+**Backend → this service.** An analyst on the F1 detail page confirms or overrides the
+AI-classified Harm sub-scores (US23). The backend proxies this immediately rather than
+applying it itself — `harm_*`, `harm_human_confirmed`, and every score derived from them
+live on this service's `claims` table.
+
+```
+PATCH {AI_SERVICE_URL}/api/v1/claims/{claim_id}/harm/confirm
+```
+
+```json
+{ "public_safety": 90.0, "institutional_trust": null, "economic": null, "policy_disruption": null }
+```
+
+All four fields optional, `0.0–100.0` each (`HarmConfirmRequest`). An omitted field keeps
+the AI's own classification; an empty body is the legitimate "I reviewed these and
+they're right" case — it still flips `harm_human_confirmed` to `true`.
+
+Implementation: `app/api/v1/endpoints/claims.py::confirm_harm`. Recomputes `harm_score`
+(`scoring_engine.harm_score`) from the (possibly partial) new sub-scores, then calls the
+same `rescore_claim` every other path uses to cascade
+`claim_score → discount_factor → final_claim_score` and append a `claim_score_snapshots`
+row. Returns the full `ExistingClaimDetailRead`; the backend documents that it ignores
+this body and re-reads the claim itself, so the response shape only matters to this
+service's own consumers.
+
+**404** for an unknown `claim_id` or a Synthetic (`non_existing`) claim — the lookup is
+scoped to Existing claims only, since Synthetic claims carry no harm scores to confirm.
+
+---
+
+## Flow 5 — Score re-evaluation
+
+**Backend → this service.** A claim's score moves with wall-clock time even when
+nothing new is ingested — NPR drifts as Opposing posts age out of the rolling window.
+Nothing on this service's side re-evaluates that on a schedule (no cron here), so the
+backend's hourly snapshot job calls this first and captures the result immediately after.
+
+```
+POST {AI_SERVICE_URL}/api/v1/claims/rescore
+```
+
+No request body. Response: `{ "claims_rescored": 4 }`.
+
+Implementation: `app/api/v1/endpoints/claims.py::rescore` →
+`clustering_service.rescore_all_existing_claims` — renormalizes Reach per topic, then
+rescores every Existing claim in it (NPR, discount, `final_claim_score`), each appending
+its own `claim_score_snapshots` row. Also exposed identically as `POST /admin/rescore`
+for this service's own admin panel.
+
+---
+
+## Flow 6 — Sample content generation / clustering
+
+**Backend → this service**, from the F4 "Generate sample data" button. Until a live
+crawler exists, this is the only way `content_items` — and therefore Existing claims —
+come into being outside of Flow 1's predicted claims and Flow 3's single demo claim.
+
+```
+POST {AI_SERVICE_URL}/api/v1/ingest/generate-synthetic
+```
+
+```json
+{ "count": 10, "topic_hint": "road pricing", "auto_cluster": true }
+```
+
+All fields optional (defaults: 10 items, auto-clustered); `count` capped at 50.
+Implementation: `app/api/v1/endpoints/ingestion.py::generate_synthetic_ingest` —
+fabricates `count` realistic posts via `llm.generate_synthetic_posts`, runs them through
+the normal analyze → embed → persist pipeline, then (if `auto_cluster`) clusters
+synchronously rather than waiting for the next pass. This is why the backend documents
+this call on its long timeout budget, not the short one.
+
+**Flow 6b — `POST /api/v1/claims/cluster-now`** — the same clustering step alone, for
+content that was ingested but whose background clustering pass hasn't run yet
+(`app/api/v1/endpoints/claims.py::cluster_now`). No request body.
+
+---
+
+## Flow 7 & 8 — Coordinated-Network Detector (F5), no shared-table read
+
+F5 is built (PRD v1.4 §10), scoped and verified against the backend's actual merged
+code (`CIS-Backend` `main`, commit `910cd82`, pulled and reviewed this session) —
+not an earlier guessed contract. This service owns the detection pipeline + 10
+output tables + two endpoints. Everything human-facing (network list/detail/review,
+allowlist CRUD, PDF/ZIP reports, F4 config, export audit log) is the backend's — it
+reads the 10 tables directly, same as every other AI-owned table above.
+
+- **`POST /api/v1/detection/runs`** (Flow 7) and **`POST /api/v1/detection/snapshots/purge`**
+  (Flow 8) — the two touchpoints counted in the table at the top of this doc — the backend
+  calls the first whenever it decides to run detection (its own schedule, its own
+  velocity watch, or an analyst's on-demand click) and the second whenever it's
+  computed which networks are past retention. See `docs/COORDINATION.md` for both
+  request shapes.
+- **No shared-table read after all**: an earlier design had this service read a
+  `cis_coordination_allowlist` table directly (the one place the read direction
+  would have reversed). The backend's actual contract sends the allowlist +
+  common-phrase exclusions inline in the detection-run request instead — simpler,
+  and it means the "backend `SELECT`s your tables, never writes them, and you never
+  read theirs" rule above holds with **zero** exceptions in either direction.
+- The old `POST /coordination/check-cib` stateless heuristic (posts supplied directly
+  in the request, no DB read/write) still exists, predates the real pipeline, and is
+  unrelated to it — not retired, just superseded.
+
+---
+
 ## `claim_type` vocabulary
 
 This service's `ClaimType` enum values are `existing` / `non_existing` — these already
@@ -281,43 +413,49 @@ already-generated claim.
 
 ---
 
+## PRD v1.5 additions — asks #8 and #9 from `docs/AI-INTEGRATION.md`
+
+Both implemented. Same "generated once, cached forever" rule as `activity_content`
+above applies to both — neither is ever regenerated on a re-fetch.
+
+**`content_items.sentiment`** (ask #8) — `positive` / `negative` / `neutral`, set by
+`LLMClient.analyze_content()` at ingestion time, on every ingestion path (single,
+batch, and synthetic all funnel through `content_ingestion_service.build_content_item`).
+`NULL` only for rows ingested before this shipped. **Not derived from `stance`** — see
+`app/models/enums.py::Sentiment`'s docstring; the two axes are assessed independently
+and must never be conflated, per the backend's own note in `AI-INTEGRATION.md`.
+
+**`claim_debunk_segments`** (ask #9) — one row per audience segment, generated
+alongside `activity_content` (same call site, same once-only guard) from the claim's
+Supporting-side sample. `LLMClient.generate_debunk_segments()` returns 1–4 segments;
+`rank` is assignment order (most-exposed first, per the LLM's own ordering). Flow 3's
+demo claim populates this too, since it goes through the same
+`clustering_service.build_claim_from_content_items` construction path. On any
+generation failure the row set is simply empty and `activity_content` still exists —
+matches the fallback the backend already documents.
+
+Schema matches `docs/sql/02_f6_reference_schema.sql` from the backend repo exactly
+(`app/models/debunk_segment.py`), so no sign-off round-trip should be needed on the
+DDL itself.
+
+Deliberately not implemented yet: **`content_items.city`** (ask #10) — deferred until
+a second city is actually configured; today's single-city Jakarta deployment gets no
+benefit from partitioning on a column that would only ever hold one value.
+
+---
+
 ## Config (this service's `.env`)
 
 | Var | Default | Purpose |
 |---|---|---|
 | `BACKEND_URL` | `""` (unset) | Base URL for the Flow 2 outbound callback. Skipped (logged, not fatal) if unset. |
-| `AI_SERVICE_API_KEY` | `""` (unset) | If set, `POST /matchmaking/policies` and `POST /claims/generate-generic` require a matching `X-API-Key` or `Authorization: Bearer` header (`app/core/security.py::verify_backend_api_key`). If unset (the current deployment's default), every request is accepted with no header at all — both services are assumed reachable only over a private network. |
+| `AI_SERVICE_API_KEY` | `""` (unset) | If set, `POST /matchmaking/policies`, `POST /claims/generate-generic`, `POST /detection/runs`, and `POST /detection/snapshots/purge` require a matching `X-API-Key` or `Authorization: Bearer` header (`app/core/security.py::verify_backend_api_key`). If unset (the current deployment's default), every request is accepted with no header at all — both services are assumed reachable only over a private network. Flow 4/5/6/6b are not gated by this dependency at all yet, regardless of this setting — see their sections above. |
 | `INTERNAL_API_KEY` | `""` (unset) | Sent as `X-Internal-Key` on the Flow 2 callback, only if set. Must match whatever the backend's own `INTERNAL_API_KEY` expects (currently unset on the backend too). |
 
 Set either pair of keys on **both** sides together if the network boundary ever stops
 being private-only.
 
 ---
-
-## Coordinated-Network Detector (F5) — 2 more touchpoints, no shared-table read
-
-F5 is built (PRD v1.4 §10), scoped and verified against the backend's actual merged
-code (`CIS-Backend` `main`, commit `910cd82`, pulled and reviewed this session) —
-not an earlier guessed contract. This service owns the detection pipeline + 10
-output tables + two endpoints. Everything human-facing (network list/detail/review,
-allowlist CRUD, PDF/ZIP reports, F4 config, export audit log) is the backend's — it
-reads the 10 tables directly, same as every other AI-owned table above.
-
-- **`POST /api/v1/detection/runs`** and **`POST /api/v1/detection/snapshots/purge`**
-  (2 more HTTP touchpoints beyond the 3 flows above, i.e. 5 total) — the backend
-  calls the first whenever it decides to run detection (its own schedule, its own
-  velocity watch, or an analyst's on-demand click) and the second whenever it's
-  computed which networks are past retention. See `docs/COORDINATION.md` for both
-  request shapes.
-- **No shared-table read after all**: an earlier design had this service read a
-  `cis_coordination_allowlist` table directly (the one place the read direction
-  would have reversed). The backend's actual contract sends the allowlist +
-  common-phrase exclusions inline in the detection-run request instead — simpler,
-  and it means the "backend `SELECT`s your tables, never writes them, and you never
-  read theirs" rule above holds with **zero** exceptions in either direction.
-- The old `POST /coordination/check-cib` stateless heuristic (posts supplied directly
-  in the request, no DB read/write) still exists, predates the real pipeline, and is
-  unrelated to it — not retired, just superseded.
 
 ## What's explicitly out of scope / deferred
 

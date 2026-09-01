@@ -9,7 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.config import settings
 from app.core.database import Base
-from app.models.enums import ContentSource, MoralFoundation, Stance
+from app.models.enums import ContentSource, MoralFoundation, Sentiment, Stance
 
 if TYPE_CHECKING:
     from app.models.claim import Claim
@@ -44,6 +44,11 @@ class ContentItem(Base):
     )
     extracted_claim: Mapped[str | None] = mapped_column(Text, nullable=True)
     underlying_grievance: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # PRD v1.5 6.6.1 - feeds F6's Climate Sentiment Index. Independent of `stance`;
+    # see Sentiment's docstring for why the two must never be conflated. NULL means
+    # not yet classified, and still counts toward CSI's denominator (a classification
+    # backlog must not make the city look calmer than it is).
+    sentiment: Mapped[Sentiment | None] = mapped_column(String(16), nullable=True)
 
     # NULL until clustered - only assessable relative to a specific claim.
     stance: Mapped[Stance | None] = mapped_column(String(16), nullable=True)

@@ -14,6 +14,8 @@ from app.schemas.analysis import (
     ClaimSummarySchema,
     ContentAnalysisSchema,
     DebunkContentSchema,
+    DebunkSegmentBatchSchema,
+    DebunkSegmentSchema,
     HarmClassificationSchema,
     NonExistingClaimPredictionSchema,
     PolicyClaimMatchBatchSchema,
@@ -72,6 +74,14 @@ Guidance:
 - underlying_grievance: the deeper community concern or grievance this content taps into \
   (e.g. distrust of local government, cost-of-living anxiety, historical displacement), \
   in one short phrase.
+- sentiment: the content's own emotional valence toward the climate/city topic it \
+  discusses - "positive" (reassured, approving, hopeful), "negative" (alarmed, \
+  distrustful, angry, critical), or "neutral" (purely factual/informational, or mixed \
+  with no clear lean). Judge this on the content itself, NOT on whether it happens to \
+  support or oppose any specific claim - a post calmly correcting a false rumor is \
+  informative-toward-positive, not negative, even though it is emotionally charged \
+  about the rumor itself; a genuine complaint about a real problem is negative even if \
+  no specific claim is involved.
 - text_en: an English translation of the content. If it is already in English, echo it \
   back unchanged. Translate meaning faithfully, including tone (keep sarcasm sarcastic, \
   keep outrage outraged) - this text is used for downstream embedding/clustering, not \
@@ -206,6 +216,37 @@ Strict rules:
 4. reiterated_fact: restate the core verified fact again, in different words, so the \
    correction ends on the truth.
 5. Keep tone calm, neutral, non-partisan, and non-condescending.
+"""
+
+DEBUNK_SEGMENTS_SYSTEM_PROMPT = """\
+You are identifying the audience segments most exposed to a false or misleading claim, \
+and drafting a tailored corrective message for each one, for a city government's Claim \
+Repository Bank (PRD v1.5 US12) - this REPLACES a single generic Debunk draft with one \
+draft per segment.
+
+Given the claim being debunked, grounded reference/policy context, and a sample of the \
+actual posts spreading it (used only to infer who is engaging - never quote them back \
+verbatim), do the following:
+
+1. Identify 1-4 distinct audience segments most exposed to or affected by this claim, \
+   inferred from the demographic, interest, or community pattern visible across the \
+   sample posts (e.g. "Commuters", "Small business owners near the site", "Parents of \
+   school-age children"). Do not invent a segment the sample gives no basis for - if the \
+   posts show no real variation in who is engaging, one broad segment is the correct \
+   answer, not four contrived ones.
+2. Order segments most-exposed-first (roughly, by how much of the sample they represent).
+3. For each segment, write:
+   - segment_name: a short (2-5 word) label for the card (e.g. "Commuters").
+   - segment_rationale: one short sentence on why this segment is exposed and what \
+     specific framing or concern makes the claim land differently for them.
+   - content: a tailored corrective message addressing THIS segment's specific framing/ \
+     concern, following the same Truth Sandwich discipline as a single debunk - lead with \
+     the true, verified fact; briefly and neutrally note that a false claim is circulating \
+     WITHOUT repeating its specific wording; end by restating the true fact. Ground every \
+     factual statement ONLY in the provided context. Keep tone calm, neutral, and \
+     non-condescending, and make each draft genuinely speak to that segment's concern - \
+     if the segments are real, the drafts should read differently from each other, not \
+     restate the same paragraph with the segment name swapped in.
 """
 
 NON_EXISTING_CLAIM_PREDICTION_SYSTEM_PROMPT = """\
@@ -416,6 +457,26 @@ class LLMClient:
             system_instruction=DEBUNK_CONTENT_SYSTEM_PROMPT,
             schema=DebunkContentSchema,
         )
+
+    async def generate_debunk_segments(
+        self, claim_statement: str, grounding_context: str, sample_texts: list[str]
+    ) -> list[DebunkSegmentSchema]:
+        """PRD v1.5 US12 - one tailored debunk draft per audience segment, inferred from
+        a sample of the claim's Supporting-side posts."""
+        joined = "\n---\n".join(sample_texts[:10])
+        prompt = (
+            f"Claim being debunked (for context only - do not quote verbatim in any "
+            f"segment's flag):\n{claim_statement}\n\n"
+            f"Grounded reference/policy context:\n{grounding_context or 'None provided.'}\n\n"
+            f"Sample posts spreading the claim (for inferring audience segments only):\n"
+            f"{joined or 'None provided.'}"
+        )
+        result = await self._generate_structured(
+            prompt=prompt,
+            system_instruction=DEBUNK_SEGMENTS_SYSTEM_PROMPT,
+            schema=DebunkSegmentBatchSchema,
+        )
+        return result.segments
 
     async def predict_non_existing_claim(
         self, policy_title: str, policy_description: str, grounding_context: str

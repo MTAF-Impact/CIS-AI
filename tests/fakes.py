@@ -1,10 +1,11 @@
 """Test doubles for external services so the test suite never needs a real API key."""
 
-from app.models.enums import ContentSource, MoralFoundation, Stance
+from app.models.enums import ContentSource, MoralFoundation, Sentiment, Stance
 from app.schemas.analysis import (
     ClaimSummarySchema,
     ContentAnalysisSchema,
     DebunkContentSchema,
+    DebunkSegmentSchema,
     HarmClassificationSchema,
     NonExistingClaimPredictionSchema,
     SyntheticPostSchema,
@@ -24,6 +25,15 @@ def _fake_topic_label(text: str) -> str:
     return "General"
 
 
+def _fake_sentiment(text: str) -> Sentiment:
+    lowered = text.lower()
+    if any(kw in lowered for kw in ("hidden tax", "secretly", "scam", "corrupt", "toxic")):
+        return Sentiment.NEGATIVE
+    if any(kw in lowered for kw in ("great", "thank", "approve", "improve", "happy")):
+        return Sentiment.POSITIVE
+    return Sentiment.NEUTRAL
+
+
 class FakeLLMClient:
     """Deterministic stand-in for LLMClient - classification/stance are keyword-driven."""
 
@@ -39,6 +49,7 @@ class FakeLLMClient:
             moral_foundation=MoralFoundation.FAIRNESS,
             extracted_claim=text[:200],
             underlying_grievance="fake grievance for testing",
+            sentiment=_fake_sentiment(text),
             text_en=text,
         )
 
@@ -95,6 +106,20 @@ class FakeLLMClient:
             nuanced_flag="A claim suggesting otherwise has circulated and is not accurate.",
             reiterated_fact="Fake reiterated fact for testing.",
         )
+
+    async def generate_debunk_segments(
+        self, claim_statement: str, grounding_context: str, sample_texts: list[str]
+    ) -> list[DebunkSegmentSchema]:
+        self.calls.append(
+            ("generate_debunk_segments", (claim_statement, grounding_context, sample_texts), {})
+        )
+        return [
+            DebunkSegmentSchema(
+                segment_name="General Public",
+                segment_rationale="Fake rationale for testing.",
+                content="Fake segmented debunk content for testing.",
+            )
+        ]
 
     async def predict_non_existing_claim(
         self, policy_title: str, policy_description: str, grounding_context: str
@@ -171,6 +196,11 @@ class AlwaysFailingLLMClient:
     async def generate_debunk(
         self, claim_statement: str, grounding_context: str
     ) -> DebunkContentSchema:
+        raise self._error()
+
+    async def generate_debunk_segments(
+        self, claim_statement: str, grounding_context: str, sample_texts: list[str]
+    ) -> list[DebunkSegmentSchema]:
         raise self._error()
 
     async def predict_non_existing_claim(

@@ -81,6 +81,16 @@ class TestTranslation:
         assert response.json()["text_en"] == "The ERP charge is a hidden tax."
 
 
+class TestSentiment:
+    async def test_analysis_populates_sentiment(self, client):
+        """PRD v1.5 6.6.1 - feeds F6's Climate Sentiment Index."""
+        response = await client.post(
+            "/api/v1/ingest", json={"text": "The ERP charge is a hidden tax."}
+        )
+        assert response.status_code == 201
+        assert response.json()["sentiment"] == "negative"
+
+
 class TestExternalRefDedup:
     async def test_single_ingest_is_idempotent_on_external_ref(self, client):
         payload = {"text": "Duplicate-prone crawled post.", "external_ref": "rss:feedA:guid-1"}
