@@ -23,7 +23,8 @@ backend's exclusive territory (`cis_users`, `cis_refresh_tokens`, `cis_policies`
 `cis_claim_reviews`, `cis_claim_alerts`, `cis_claim_score_snapshots`, `cis_settings`).
 `scripts/reset_schema.py` explicitly excludes anything prefixed `cis_` from its drop
 step for exactly this reason. See `GO_INTEGRATION.md` for the full ownership contract
-and the 3 HTTP touchpoints that replace direct table access between the two services.
+and the HTTP touchpoints that replace direct table access between the two services (8
+endpoints the backend calls on this service, 2 in the reverse direction, as of that doc).
 
 All tables live in the same Supabase Postgres instance, `public` schema, with the
 `vector` extension enabled (pgvector, for the `embedding` columns).

@@ -26,7 +26,7 @@ run, curl examples) — these docs are the exhaustive reference behind it.
   `GO_INTEGRATION.md`.
 - **"I need to read/join this service's tables directly"** → don't — see the ownership
   rule in `GO_INTEGRATION.md`. Read-only `SELECT` access is fine; anything else goes
-  through the 3 HTTP flows.
+  through the HTTP flows listed there.
 - **"What does `final_claim_score` actually mean and how is it computed"** →
   `SCORING.md`.
 - **"I'm adding a new endpoint that needs to do slow/async work"** →
