@@ -80,7 +80,9 @@ Implementation: `app/api/v1/endpoints/matchmaking.py` →
 See `API_REFERENCE.md`'s Matchmaking section for the exact field table. In short:
 `policy_id` (the backend's `cis_policies.id` — **not** this service's own `Policy.id`),
 `name`, `description`, `rolled_out_date`, `status` (informational, ignored for scoring
-purposes), `file_name`, `file_mime_type`, `document_url`.
+purposes), `file_name`, `file_mime_type`, `document_url`, plus two fields covered under
+Idempotency below: `force` (bool, default false) and `callback_url` (optional, see
+Flow 2).
 
 `document_url` is a **time-limited signed URL** (Supabase Storage, default ~1h
 validity). This service fetches it with a plain `httpx.AsyncClient.get()` —
@@ -93,7 +95,18 @@ If `document_url` is absent, unreachable, times out, or the fetched bytes aren't
 supported type (PDF/`.docx`), this service **does not fail the request** — it proceeds
 working from `name`/`description` alone, per the backend's own documented fallback
 ("work from the name alone"). This is a best-effort try/except in
-`policy_matchmaking_service._fetch_and_extract`.
+`policy_matchmaking_service._fetch_and_extract`, split into two independent halves: a
+fetch failure loses the file entirely (nothing downloaded to keep), an *extraction*
+failure keeps the downloaded bytes and drops only the text. The extraction half is
+deliberately broad (any exception from `extract_text`, not just the expected
+"unsupported file type" case) — a real incident showed why: an AES-encrypted PDF (a
+common permission-only scheme for government documents, no password needed to read)
+made `pypdf` raise `DependencyError` because the `cryptography` package it needs
+wasn't installed. That's now a real dependency, so AES-encrypted PDFs extract
+normally; a narrower failure mode (this or anything else `extract_text` might throw)
+degrades to "no extracted text" instead of crashing the whole Flow 1 job before the
+`Policy` row is even created — which is what happened, and which looks indistinguishable
+from the request never arriving at all (no row, no error, no Flow 2 callback).
 
 ### Response
 
@@ -131,14 +144,36 @@ because the backend retries a failed matchmaking up to 3× via a daily job, and 
 operator can trigger `POST /policies/:id/rematch` manually.
 
 Implementation: before creating anything, `run_matchmaking_webhook` looks up
-`SELECT * FROM policies WHERE backend_policy_id = :policy_id`. If found, it **does not
-re-run the pipeline at all** — it recomputes `matched_claim_count`
-(`COUNT(*) FROM claim_policies WHERE policy_id = <existing ai_policy_id>`) and
-`generated_claim_count` (`COUNT(*) FROM claims WHERE policy_id = <existing ai_policy_id>
-AND claim_type = 'non_existing'`) from the already-persisted state, and reports those via
-Flow 2 with `status: "completed"`. This guarantees zero duplicate `Policy` rows and zero
-duplicate generated claims on any retry, no matter how many times the backend calls
-this endpoint with the same `policy_id`.
+`SELECT * FROM policies WHERE backend_policy_id = :policy_id`. What happens next
+depends on `force` and whether the previous run actually succeeded:
+
+- **No existing row** → normal path: create a new `Policy`, run the pipeline.
+- **Existing row, `force` is false, and the previous run genuinely succeeded**
+  (`policies.last_matchmaking_error IS NULL`) → **short-circuit**, no re-run.
+  Recomputes `matched_claim_count`
+  (`COUNT(*) FROM claim_policies WHERE policy_id = <existing ai_policy_id>`) and
+  `generated_claim_count` (`COUNT(*) FROM claims WHERE policy_id = <existing
+  ai_policy_id> AND claim_type = 'non_existing'`) from the already-persisted state
+  and reports those via Flow 2 with `status: "completed"` — this is what makes the
+  backend's retry sweep cheap when the only thing that was actually lost was the
+  Flow 2 report itself.
+- **Existing row, and either `force` is true OR the previous run failed**
+  (`last_matchmaking_error` is set) → **re-run against the same row.** `Policy.id`
+  (and therefore `ai_policy_id`) never changes — the pipeline supersedes the prior
+  `claim_policies` links and predicted claim rather than duplicating them
+  (`DELETE ... WHERE policy_id = :id` on both, before re-running). This is what lets
+  a failed run actually recover, and lets `PUT /policies/:id/file` (a replaced
+  document) re-match against the new content instead of silently reporting the old
+  result forever.
+
+`last_matchmaking_error` (nullable text on `policies`) is the field that makes the
+second and third cases distinguishable: `NULL` means "never run, or the last run
+succeeded"; anything else is the last failure's message, and its mere presence is
+what triggers an automatic re-run even without `force`. It's set in a `finally`
+block on every run, success or failure, so it's never stale.
+
+This guarantees zero duplicate `Policy` rows on any retry, whether or not it
+re-runs — the correlation is always `backend_policy_id`, one row per, forever.
 
 ---
 
@@ -148,10 +183,15 @@ this endpoint with the same `policy_id`.
 success, failure, or the idempotent-retry short-circuit above.
 
 ```
-POST {BACKEND_URL}/api/v1/internal/policies/{policy_id}/matchmaking-result
+POST {callback_url, or BACKEND_URL/api/v1/internal/policies/{policy_id}/matchmaking-result}
 Content-Type: application/json
 X-Internal-Key: {INTERNAL_API_KEY}   (only sent if INTERNAL_API_KEY is set)
 ```
+
+If Flow 1's request body carried a `callback_url`, that full URL is used as-is and
+preferred over `BACKEND_URL` — this is what lets one AI deployment serve multiple
+backend environments (staging/production) without either one hardcoded on this side.
+Falls back to `BACKEND_URL` + the path above when `callback_url` is absent.
 
 Implementation: `app/services/backend_callback_service.py::report_matchmaking_result`.
 
@@ -199,7 +239,10 @@ Full request/response shape: `API_REFERENCE.md`. Implementation:
 LLM-fabricated post cluster through the **exact same** construction + scoring pipeline
 real HDBSCAN clustering uses (`clustering_service.build_claim_from_content_items`) —
 never a separate "fake claim" path that could drift out of sync with real scoring
-behavior.
+behavior. The generated claim is also linked to a `Policy` (`claim_policies`) —
+nearest by embedding cosine similarity among policies that have one, else the most
+recently created `Policy`, no-op only if no `Policy` exists at all — so the F1 detail
+page's Related Policies panel is populated for demo claims too, not left empty.
 
 Response is deliberately minimal (`claim_id`, `claim_statement`, `topic_id`, `message`)
 — matches the backend's documented shape exactly. For a fuller response with the
