@@ -29,12 +29,13 @@ Pydantic schema in `app/schemas/analysis.py`):
 
 | Method | Purpose | Called from |
 |---|---|---|
-| `analyze_content(text)` | Ingestion-time: outrage score, moral foundation, extracted claim, underlying grievance. | `content_ingestion_service.analyze_and_build_item` |
+| `analyze_content(text)` | Ingestion-time: outrage score, moral foundation, extracted claim, underlying grievance, sentiment (PRD v1.5 6.6.1 — independent of `stance`, feeds F6's Climate Sentiment Index). | `content_ingestion_service.analyze_and_build_item` |
 | `summarize_claim(sample_texts)` | Synthesize a fresh `claim_statement` + candidate `topic_label` from a cluster of posts. | `clustering_service.build_claim_from_content_items` |
 | `classify_stance(claim_statement, post_text)` | Single-post stance vs. a known claim. | `clustering_service` Pass 1 (attach to existing claim) |
 | `classify_stances_batch(claim_statement, texts)` | Batched stance for a whole new cluster in one call. Raises `StanceCountMismatchError` if the model returns a different count than given — the caller must not silently zip a misaligned result. | `clustering_service` Pass 2 (new claim), falls back to per-item `classify_stance` on failure |
 | `classify_harm(claim_statement, sample_supporting_texts)` | The 4 Harm sub-scores, against the detailed 5-band rubric (see `SCORING.md`). | `clustering_service.build_claim_from_content_items` |
 | `generate_debunk(claim_statement, grounding_context)` | The Truth Sandwich (`core_fact`/`nuanced_flag`/`reiterated_fact`). | `activity_service.generate_and_cache_debunk_activity` |
+| `generate_debunk_segments(claim_statement, grounding_context, sample_texts)` | PRD v1.5 US12: 1-4 audience segments (`segment_name`/`segment_rationale`/`content`), inferred from a Supporting-side sample, most-exposed first. | `activity_service._generate_debunk_segments` |
 | `predict_non_existing_claim(policy_title, policy_description, grounding_context)` | Predicted claim statement, topic, attack angle, framing, and the Prebunk explainer. | `claim_prediction_service.predict_non_existing_claim` |
 | `generate_synthetic_posts(count, topic_hint, grounding_context)` | Fabricates realistic Jakarta posts (prototype crawler stand-in). | `ingestion.py`'s `/ingest/generate-synthetic`, `admin_service.generate_demo_existing_claim` |
 | `confirm_policy_claim_matches(policy_title, policy_description, candidate_claim_statements)` | One boolean per candidate claim — is it genuinely about this policy? Raises `ValueError` on a count mismatch. | `policy_matchmaking_service._run` |
@@ -206,15 +207,25 @@ controls the transaction boundary.
 
 ## `app/services/activity_service.py`
 
-`generate_and_cache_debunk_activity(db, claim, llm, embedder)` — **Existing** claims'
-Debunk Activity. Idempotent guard (`if claim.activity_content is not None: return`) —
-never regenerates. Retrieves fault-line grounding for `claim.claim_statement`, calls
-`llm.generate_debunk`, writes the concatenated `activity_content` **and** the 3 split
-Truth Sandwich fields (`debunk_core_fact`/`debunk_nuanced_flag`/`debunk_reiterated_fact`)
-— the concatenation is still the single copyable block the PRD requires; the 3 fields let
-the FE render them as distinct labeled UI blocks without having to guess where to split
-the combined text. On LLM failure, logs and leaves `activity_content` unset (never
-partially populated).
+`generate_and_cache_debunk_activity(db, claim, llm, embedder, supporting_texts=None)` —
+**Existing** claims' Debunk Activity. Idempotent guard (`if claim.activity_content is not
+None: return`) — never regenerates. Retrieves fault-line grounding for
+`claim.claim_statement`, calls `llm.generate_debunk`, writes the concatenated
+`activity_content` **and** the 3 split Truth Sandwich fields
+(`debunk_core_fact`/`debunk_nuanced_flag`/`debunk_reiterated_fact`) — the concatenation is
+still the single copyable block the PRD requires; the 3 fields let the FE render them as
+distinct labeled UI blocks without having to guess where to split the combined text. On
+LLM failure, logs and leaves `activity_content` unset (never partially populated).
+
+Also generates the PRD v1.5 `claim_debunk_segments` (US12), via the private
+`_generate_debunk_segments` helper, guarded by the same early return — `supporting_texts`
+(the claim's Supporting-side sample) is what the LLM infers audience segments from,
+falling back to `[claim.claim_statement]` when not given. Dedupes the LLM's response on
+`segment_name` before inserting (the table has `UNIQUE(claim_id, segment_name)`; a
+repeated name is a prompt-level near-miss, not something to trust as a hard guarantee).
+Failure here is independent of the generic draft above — it's caught separately and never
+un-sets `activity_content`, matching the backend's documented fallback (empty segment
+table → render the generic draft, exactly as PRD v1.4).
 
 `render_prebunk_activity(inoculation_explainer)` — trivial: **Non-Existing** claims'
 Prebunk Activity is just the `inoculation_explainer` field verbatim, no further

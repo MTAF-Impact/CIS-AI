@@ -74,6 +74,7 @@ translation), embeds the translation, persists it. **Auth:** optional `X-API-Key
   "id": "uuid", "text": "...", "text_en": "...", "source": "social", "author_id": null,
   "location": "Sudirman", "outrage_score": 0.62, "moral_foundation": "fairness",
   "extracted_claim": "The ERP charge is a hidden tax", "underlying_grievance": "cost-of-living anxiety",
+  "sentiment": "negative",
   "stance": null, "impressions": null, "positive_reaction_count": null, "negative_reaction_count": null,
   "external_ref": null, "claim_id": null, "created_at": "2026-08-31T10:00:00Z"
 }
@@ -234,6 +235,12 @@ individually, never just the collapsed number:
 See `SCORING.md` for what every score field means and its valid range.
 `falseness_score: null` is expected — the reference corpus (`official_sources`) is
 currently empty in this deployment.
+
+**`claim_debunk_segments` (PRD v1.5 US12) is deliberately not in this shape.** It's a
+DB-only addition, read directly by the backend the same way every other AI-owned table
+is (see `GO_INTEGRATION.md`) rather than through this REST response — consistent with
+`activity_content` above being the only debunk surface this endpoint has ever exposed.
+See `DATA_MODEL.md`'s `claim_debunk_segments` section for its columns.
 
 **200, `claim_type: "non_existing"`** (`NonExistingClaimDetailRead`) — no score fields at
 all:
