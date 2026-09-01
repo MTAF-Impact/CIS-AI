@@ -42,13 +42,22 @@ class FakeLLMClient:
             text_en=text,
         )
 
-    async def summarize_claim(self, sample_texts: list[str]) -> ClaimSummarySchema:
-        self.calls.append(("summarize_claim", (sample_texts,), {}))
+    async def summarize_claim(
+        self, sample_texts: list[str], existing_topic_names: list[str] | None = None
+    ) -> ClaimSummarySchema:
+        self.calls.append(("summarize_claim", (sample_texts, existing_topic_names), {}))
         # Echoes the source text so topic/claim-attach similarity tests stay meaningful.
         representative = sample_texts[0] if sample_texts else "General claim"
+        label = _fake_topic_label(representative)
+        # Mirrors the real prompt's reuse instruction: prefer an existing label that
+        # matches case-insensitively over inventing a differently-cased variant.
+        for existing in existing_topic_names or []:
+            if existing.strip().lower() == label.strip().lower():
+                label = existing
+                break
         return ClaimSummarySchema(
             claim_statement=f"Claim: {representative}",
-            topic_label=_fake_topic_label(representative),
+            topic_label=label,
         )
 
     async def classify_stance(self, claim_statement: str, post_text: str) -> Stance:
@@ -141,7 +150,9 @@ class AlwaysFailingLLMClient:
     async def analyze_content(self, text: str) -> ContentAnalysisSchema:
         raise self._error()
 
-    async def summarize_claim(self, sample_texts: list[str]) -> ClaimSummarySchema:
+    async def summarize_claim(
+        self, sample_texts: list[str], existing_topic_names: list[str] | None = None
+    ) -> ClaimSummarySchema:
         raise self._error()
 
     async def classify_stance(self, claim_statement: str, post_text: str) -> Stance:

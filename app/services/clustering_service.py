@@ -47,10 +47,37 @@ def _centroid(vectors: list[list[float]]) -> np.ndarray:
 async def assign_or_create_topic(
     db: AsyncSession, claim_embedding: list[float], candidate_label: str
 ) -> Topic:
-    """Attach to the nearest topic by centroid similarity, or create a new one."""
+    """Attach to the nearest topic by centroid similarity, or create a new one.
+
+    An exact (case-insensitive) name match always wins over the embedding threshold:
+    the LLM is now shown existing topic names and asked to reuse one verbatim when it
+    fits, so if it did reuse a name, that is a stronger signal than a centroid score
+    that happened to fall just under TOPIC_ATTACH_THRESHOLD - without this, two claims
+    the LLM itself labeled identically could still end up as two different topic rows
+    with the same name."""
     existing_topics = list(
         (await db.execute(select(Topic).where(Topic.embedding.is_not(None)))).scalars().all()
     )
+
+    normalized_label = candidate_label.strip().lower()
+    name_match = next(
+        (t for t in existing_topics if t.name.strip().lower() == normalized_label), None
+    )
+    if name_match is not None:
+        sibling_embeddings = list(
+            (
+                await db.execute(
+                    select(Claim.embedding).where(
+                        Claim.topic_id == name_match.id, Claim.embedding.is_not(None)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        name_match.embedding = _centroid([*sibling_embeddings, claim_embedding]).tolist()
+        return name_match
+
     claim_vec = np.asarray(claim_embedding)
 
     best_topic, best_score = None, -1.0
@@ -296,8 +323,11 @@ async def build_claim_from_content_items(
     """Build one new existing claim from a cluster of content items. Shared by Pass 2
     below and admin_service's demo-claim generator."""
     sample_texts = [item.text for item in cluster_items[:MAX_SAMPLE_TEXTS_FOR_SUMMARY]]
+    existing_topic_names = list(
+        (await db.execute(select(Topic.name))).scalars().all()
+    )
     try:
-        summary = await llm.summarize_claim(sample_texts)
+        summary = await llm.summarize_claim(sample_texts, existing_topic_names)
         claim_statement, topic_label = summary.claim_statement, summary.topic_label
     except Exception:
         logger.exception("LLM claim summarization failed; using fallback statement")

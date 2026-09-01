@@ -88,9 +88,15 @@ Given a sample of posts that all express the same underlying claim, produce:
   posts - do not just copy or lightly reword a single post.
 - topic_label: a short (2-5 word) label for the broader subject-matter category this \
   claim belongs to (e.g. "Road Pricing & Transit", "Flooding & Waterways", "Waste & \
-  Pollution"). This will be used to match against existing topic labels, so keep it \
-  general enough to plausibly cover other related claims, not hyper-specific to this \
-  one claim.
+  Pollution"). Keep it general enough to plausibly cover other related claims, not \
+  hyper-specific to this one claim.
+
+  A list of already-existing topic labels may be given below. If this claim clearly \
+  belongs under one of them, reuse that EXACT label verbatim (same spelling, wording, \
+  and punctuation) rather than inventing a new phrasing for the same subject - e.g. if \
+  "Waste & Pollution" already exists, do not output "Waste & Water Pollution" for \
+  another waste/pollution claim. Only propose a new label when none of the existing \
+  ones genuinely fit.
 """
 
 STANCE_SYSTEM_PROMPT = """\
@@ -339,10 +345,17 @@ class LLMClient:
             schema=ContentAnalysisSchema,
         )
 
-    async def summarize_claim(self, sample_texts: list[str]) -> ClaimSummarySchema:
-        """Synthesize a claim_statement + candidate topic_label from a new cluster."""
+    async def summarize_claim(
+        self, sample_texts: list[str], existing_topic_names: list[str] | None = None
+    ) -> ClaimSummarySchema:
+        """Synthesize a claim_statement + candidate topic_label from a new cluster.
+        existing_topic_names lets the LLM reuse an exact existing label instead of
+        inventing a differently-worded near-duplicate for the same subject."""
         joined = "\n---\n".join(sample_texts[:20])
         prompt = f"Sample posts from this cluster:\n\n{joined}"
+        if existing_topic_names:
+            topics_list = "\n".join(f"- {name}" for name in existing_topic_names)
+            prompt += f"\n\nAlready-existing topic labels (reuse one verbatim if it fits):\n{topics_list}"
         return await self._generate_structured(
             prompt=prompt,
             system_instruction=CLAIM_SUMMARY_SYSTEM_PROMPT,
