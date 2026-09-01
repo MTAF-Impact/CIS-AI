@@ -21,10 +21,6 @@ from app.schemas.coordination_network import (
     PurgeSnapshotsResponse,
 )
 from app.services.coordination import governance, pipeline
-from app.services.multilingual_embedding_service import (
-    MultilingualEmbeddingService,
-    get_multilingual_embedding_service,
-)
 
 router = APIRouter(prefix="/detection", tags=["detection"])
 
@@ -39,7 +35,6 @@ async def trigger_detection_run(
     payload: DetectionRunRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
-    embedder: MultilingualEmbeddingService = Depends(get_multilingual_embedding_service),
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> DetectionRunResponse:
     """PRD 10.5.8 - all three trigger modes (scheduled/velocity/on-demand) are the
@@ -47,7 +42,14 @@ async def trigger_detection_run(
     detection_run row is created synchronously (status=pending) before the 202
     response, so run_id is real and immediately queryable - the backend never
     polls, it reads the row directly as the pipeline updates it in the
-    background."""
+    background.
+
+    The multilingual embedder is deliberately NOT a request-scoped dependency
+    here: it's only used inside the background task, and requesting it via
+    Depends() would force every cold container's first /runs call to block
+    the 202 response on a full model load/download - this endpoint hit 503s in
+    production for exactly that reason before this fix. run_detection resolves
+    it lazily itself once the response is already on its way back."""
     run = await pipeline.create_pending_run(db, payload)
     background_tasks.add_task(
         pipeline.run_detection,
@@ -57,7 +59,6 @@ async def trigger_detection_run(
         window_end=payload.window_end,
         parameters=payload.parameters,
         exclusions=payload.exclusions,
-        embedder=embedder,
         session_factory=session_factory,
     )
     # db.refresh() reads status back as a plain str (String column, no native enum
