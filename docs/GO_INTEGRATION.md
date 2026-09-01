@@ -281,6 +281,37 @@ already-generated claim.
 
 ---
 
+## PRD v1.5 additions — asks #8 and #9 from `docs/AI-INTEGRATION.md`
+
+Both implemented. Same "generated once, cached forever" rule as `activity_content`
+above applies to both — neither is ever regenerated on a re-fetch.
+
+**`content_items.sentiment`** (ask #8) — `positive` / `negative` / `neutral`, set by
+`LLMClient.analyze_content()` at ingestion time, on every ingestion path (single,
+batch, and synthetic all funnel through `content_ingestion_service.build_content_item`).
+`NULL` only for rows ingested before this shipped. **Not derived from `stance`** — see
+`app/models/enums.py::Sentiment`'s docstring; the two axes are assessed independently
+and must never be conflated, per the backend's own note in `AI-INTEGRATION.md`.
+
+**`claim_debunk_segments`** (ask #9) — one row per audience segment, generated
+alongside `activity_content` (same call site, same once-only guard) from the claim's
+Supporting-side sample. `LLMClient.generate_debunk_segments()` returns 1–4 segments;
+`rank` is assignment order (most-exposed first, per the LLM's own ordering). Flow 3's
+demo claim populates this too, since it goes through the same
+`clustering_service.build_claim_from_content_items` construction path. On any
+generation failure the row set is simply empty and `activity_content` still exists —
+matches the fallback the backend already documents.
+
+Schema matches `docs/sql/02_f6_reference_schema.sql` from the backend repo exactly
+(`app/models/debunk_segment.py`), so no sign-off round-trip should be needed on the
+DDL itself.
+
+Deliberately not implemented yet: **`content_items.city`** (ask #10) — deferred until
+a second city is actually configured; today's single-city Jakarta deployment gets no
+benefit from partitioning on a column that would only ever hold one value.
+
+---
+
 ## Config (this service's `.env`)
 
 | Var | Default | Purpose |

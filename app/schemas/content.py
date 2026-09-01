@@ -3,7 +3,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import ContentSource, MoralFoundation, Stance
+from app.models.enums import ContentSource, MoralFoundation, Sentiment, Stance
 
 
 class ContentItemCreate(BaseModel):
@@ -36,6 +36,7 @@ class ContentItemRead(BaseModel):
     moral_foundation: MoralFoundation | None
     extracted_claim: str | None
     underlying_grievance: str | None
+    sentiment: Sentiment | None
     stance: Stance | None
     impressions: int | None
     positive_reaction_count: int | None

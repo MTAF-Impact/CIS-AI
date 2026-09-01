@@ -385,7 +385,7 @@ async def build_claim_from_content_items(
             harm.policy_disruption,
         )
 
-    await generate_and_cache_debunk_activity(db, claim, llm, embedder)
+    await generate_and_cache_debunk_activity(db, claim, llm, embedder, supporting_texts)
     return claim
 
 

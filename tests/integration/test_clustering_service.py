@@ -3,6 +3,7 @@ from sqlalchemy import select
 
 from app.models.claim import Claim
 from app.models.content import ContentItem
+from app.models.debunk_segment import ClaimDebunkSegment
 from app.models.enums import ClaimStatus, ClaimType, ContentSource, Stance
 from app.models.topic import Topic
 from app.models.topic_volume_bucket import TopicVolumeBucket
@@ -72,6 +73,20 @@ class TestClusterUnclusteredContent:
             assert claim.final_claim_score == pytest.approx(claim.claim_score)  # discount=1.0
             assert claim.activity_content is not None  # generated eagerly at creation
             assert claim.activity_generated_at is not None
+
+            # PRD v1.5 US12 - segmented Debunk Activity, generated alongside the
+            # generic draft above from the same Supporting-side sample.
+            segments = (
+                await db_session.execute(
+                    select(ClaimDebunkSegment)
+                    .where(ClaimDebunkSegment.claim_id == claim.id)
+                    .order_by(ClaimDebunkSegment.rank)
+                )
+            ).scalars().all()
+            assert len(segments) == 1  # FakeLLMClient returns exactly one segment
+            assert segments[0].segment_name == "General Public"
+            assert segments[0].content
+            assert segments[0].rank == 0
 
         # Every item in each cluster got an explicit (never-defaulted) stance.
         items = (await db_session.execute(select(ContentItem))).scalars().all()

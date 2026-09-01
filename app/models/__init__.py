@@ -14,6 +14,7 @@ from app.models.coordination import (
     NetworkEvidencePost,
     OfftopicCluster,
 )
+from app.models.debunk_segment import ClaimDebunkSegment
 from app.models.fault_line import FaultLine
 from app.models.official_source import OfficialSource
 from app.models.policy import ClaimPolicy, Policy
@@ -25,6 +26,7 @@ __all__ = [
     "AdminSetting",
     "Claim",
     "ClaimAlert",
+    "ClaimDebunkSegment",
     "ClaimPolicy",
     "ClaimScoreSnapshot",
     "ContentItem",

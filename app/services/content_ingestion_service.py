@@ -57,6 +57,7 @@ def build_content_item(
         moral_foundation=analysis.moral_foundation,
         extracted_claim=analysis.extracted_claim,
         underlying_grievance=analysis.underlying_grievance,
+        sentiment=analysis.sentiment,
         impressions=payload.impressions,
         positive_reaction_count=payload.positive_reaction_count,
         negative_reaction_count=payload.negative_reaction_count,

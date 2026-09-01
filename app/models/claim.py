@@ -21,6 +21,7 @@ from app.models.enums import ClaimStatus, ClaimType
 
 if TYPE_CHECKING:
     from app.models.content import ContentItem
+    from app.models.debunk_segment import ClaimDebunkSegment
     from app.models.policy import ClaimPolicy, Policy
     from app.models.topic import Topic
 
@@ -98,4 +99,10 @@ class Claim(Base):
     )
     content_items: Mapped[list["ContentItem"]] = relationship(
         "ContentItem", back_populates="claim"
+    )
+    debunk_segments: Mapped[list["ClaimDebunkSegment"]] = relationship(
+        "ClaimDebunkSegment",
+        back_populates="claim",
+        order_by="ClaimDebunkSegment.rank",
+        cascade="all, delete-orphan",
     )
