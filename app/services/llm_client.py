@@ -138,6 +138,13 @@ city government risk-triage system, BEFORE a human reviewer confirms your assess
 Every score must be defensible to a non-technical policy reviewer, so anchor your score \
 to the band descriptions below rather than an impressionistic 0-100 guess.
 
+If live hazard-context grounding is given below the claim, use it: an alleged hazard \
+that contradicts an active BMKG forecast/warning (e.g. a false flood/storm claim \
+when none is forecast) supports a HIGHER public_safety score than the same claim \
+with no grounding available; a claim that merely restates a genuinely active \
+warning is not itself false and should not be scored as if it were. Absence of \
+grounding context is not evidence either way - score from the claim text alone.
+
 Score each dimension 0-100, using this rubric (PRD v1.3.1 Section 6.2.4):
 
 public_safety - risk of physical harm, panic, or dangerous behavior:
@@ -432,11 +439,19 @@ class LLMClient:
         return result.stances
 
     async def classify_harm(
-        self, claim_statement: str, sample_supporting_texts: list[str]
+        self,
+        claim_statement: str,
+        sample_supporting_texts: list[str],
+        hazard_context: str = "",
     ) -> HarmClassificationSchema:
-        """AI-classify the 4 Harm Severity sub-components."""
+        """AI-classify the 4 Harm Severity sub-components. hazard_context is an
+        optional live-grounding block (e.g. active BMKG forecasts - see
+        app/services/hazard_context_service.py) - omitted entirely from the prompt
+        when empty, never padded with a placeholder."""
         joined = "\n---\n".join(sample_supporting_texts[:10])
         prompt = f"Claim statement:\n{claim_statement}\n\nSample supporting posts:\n{joined}"
+        if hazard_context:
+            prompt += f"\n\nLive hazard-context grounding:\n{hazard_context}"
         return await self._generate_structured(
             prompt=prompt,
             system_instruction=HARM_CLASSIFICATION_SYSTEM_PROMPT,

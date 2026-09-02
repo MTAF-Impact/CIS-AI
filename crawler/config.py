@@ -20,6 +20,22 @@ class CrawlerSettings(BaseSettings):
     RSS_FEED_URLS: list[str] = Field(default_factory=list)
     TELEGRAM_CHANNELS: list[str] = Field(default_factory=list)
 
+    # console.cloud.google.com -> enable "YouTube Data API v3" on this project. One
+    # key, shared with the main AI service's GOOGLE_API_KEY (app/core/config.py) -
+    # same Google Cloud project, "Fact Check Tools API" also enabled on it there.
+    # Skipped entirely (like Telegram) until both this and at least one query
+    # (static or topic-derived) are available.
+    GOOGLE_API_KEY: str = ""
+    # Fixed floor/seed queries - always searched. Real breadth comes from
+    # main.py appending one query per active AI-service topic on top of these
+    # (see AIServiceClient.fetch_topic_names), so this list only needs to cover
+    # the cold-start case before any topics exist yet.
+    YOUTUBE_SEARCH_QUERIES: list[str] = Field(default_factory=list)
+    # Caps total queries per run (static + topic-derived) to protect the
+    # 10,000 unit/day quota - each query costs 100 units (search.list) plus
+    # ~1 unit per video's comment page.
+    YOUTUBE_MAX_QUERIES: int = 15
+
     # Telethon session string generated via a one-time interactive login - see
     # docs/CRAWLER.md's Phase 2 setup instructions. Empty = Telegram fetch is skipped.
     TELEGRAM_API_ID: int | None = None

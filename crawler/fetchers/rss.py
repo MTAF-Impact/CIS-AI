@@ -3,6 +3,7 @@ native popularity signal, so popularity_score approximates it via recency + cros
 corroboration (the same story appearing in multiple feeds at once)."""
 
 import logging
+import re
 from datetime import UTC, datetime
 
 import feedparser
@@ -10,6 +11,15 @@ import feedparser
 from crawler.candidate import Candidate
 
 logger = logging.getLogger(__name__)
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _strip_html(text: str) -> str:
+    """Some feeds' <summary> carries inline HTML (e.g. a trailing <img> tag) -
+    Republika/Antara both do this. Plain-text out, never rendered markup."""
+    return _WHITESPACE_RE.sub(" ", _HTML_TAG_RE.sub(" ", text)).strip()
 
 
 def fetch_rss_candidates(feed_urls: list[str]) -> list[Candidate]:
@@ -30,8 +40,9 @@ def fetch_rss_candidates(feed_urls: list[str]) -> list[Candidate]:
     now = datetime.now(UTC)
     for url, parsed in parsed_feeds:
         for entry in parsed.entries:
-            title = entry.get("title", "")
-            text = f"{title}. {entry.get('summary', '')}".strip()
+            title = _strip_html(entry.get("title", ""))
+            summary = _strip_html(entry.get("summary", ""))
+            text = f"{title}. {summary}".strip()
             if not text:
                 continue
 

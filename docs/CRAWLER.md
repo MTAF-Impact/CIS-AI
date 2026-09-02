@@ -14,9 +14,16 @@ crawler/
 ├── relevance_filter.py     # local multilingual embedding-similarity + location keyword gate
 ├── fetchers/
 │   ├── rss.py               # feedparser-based
-│   └── telegram.py           # Telethon-based, public channels only
+│   ├── telegram.py           # Telethon-based, public channels only
+│   └── youtube.py             # YouTube Data API v3 - video search + comment threads
 └── main.py                # orchestrates: fetch -> filter -> rank top-N -> submit
 ```
+
+See `docs/SOURCES.md` for the full source registry (feasibility/impact of every
+candidate source, not just what's wired up here) and how this fits the Falseness (F)
+and Harm (H) grounding sources that live in the main AI service instead of the
+crawler (`scripts/seed_debunk_corpus.py`, `app/services/fact_check_client.py`,
+`app/services/hazard_context_service.py`).
 
 ## Local run
 
@@ -35,10 +42,14 @@ quality before ever writing anything - see `ARCHITECTURE.md`'s verification sect
 |---|---|---|
 | `AI_SERVICE_URL` | `http://localhost:8000` | |
 | `AI_SERVICE_API_KEY` | `""` | Sent as `X-API-Key` if set - must match the AI service's own `AI_SERVICE_API_KEY`. |
-| `RSS_FEED_URLS` | `[]` | JSON list of feed URLs. Empty by default - needs curation, see Phase 2 below. |
+| `RSS_FEED_URLS` | `[]` | JSON list of feed URLs. Inherently a fixed publisher list (RSS has no query/topic API to search against, unlike YouTube) - "wider" here means verifying more outlet feeds, not making it algorithmically dynamic. 5 verified as of this doc: Antara (terkini + metro), CNN Indonesia, Republika, Tempo. Kompas, Detik, and beritajakarta.id's feed paths didn't resolve on a quick check - not guessed at, see `docs/SOURCES.md`. |
 | `TELEGRAM_CHANNELS` | `[]` | JSON list of public channel usernames. |
 | `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | unset | From my.telegram.org - see Phase 2. |
 | `TELEGRAM_SESSION_STRING` | `""` | From a one-time interactive login - see Phase 2. Telegram fetch is skipped entirely (not an error) until this is set. |
+| `GOOGLE_API_KEY` | `""` | console.cloud.google.com -> enable "YouTube Data API v3" -> Credentials -> API key. Self-serve, free, 10,000 quota units/day. Shared with the main AI service's own `GOOGLE_API_KEY` (`app/core/config.py`) - same project, "Fact Check Tools API" also enabled on it there. Skipped entirely until set. |
+| `YOUTUBE_SEARCH_QUERIES` | `[]` | Fixed floor/seed queries, always searched (covers cold start before any topics exist). Real breadth is dynamic: `main.py` calls `AIServiceClient.fetch_topic_names()` (`GET /api/v1/topics`) and appends one `"{topic name} jakarta"` query per active topic on top of these, so the query list grows with what the system is actually tracking instead of staying hand-picked forever. |
+| `YOUTUBE_MAX_QUERIES` | `15` | Caps total queries (static + topic-derived) per run - each costs 100 quota units (`search.list`) plus ~1/video comment page. |
+| `YOUTUBE_SEARCH_QUERIES` | `[]` | JSON list of search terms (e.g. `["banjir jakarta", "kualitas udara jakarta"]`). Each query costs 100 quota units (`search.list`) + ~1 unit per comment page fetched. |
 | `TOP_N_PER_SOURCE` | `20` | Popularity-ranked cap per source, per run. |
 | `CRAWL_WINDOW_HOURS` | `6.0` | How far back Telegram messages are considered. |
 | `RELEVANCE_THRESHOLD` | `0.35` | Cosine similarity cutoff against `fault_lines` exemplars. Tune via `--dry-run`. |

@@ -54,6 +54,20 @@ class Settings(BaseSettings):
     AI_SERVICE_API_KEY: str = ""  # validates inbound X-API-Key from the backend, if set
     INTERNAL_API_KEY: str = ""  # sent as X-Internal-Key on our callback to the backend, if set
 
+    # Data Pipeline & Source Spec v1.0, Tier B ground-truth grounding (see
+    # docs/SOURCES.md). Free and optional - silently skipped, never faked, when
+    # unset/empty. Shared with the crawler's own GOOGLE_API_KEY (crawler/config.py) -
+    # one Google Cloud project API key, same value, both "YouTube Data API v3" and
+    # "Fact Check Tools API" enabled on it. Kept as a separate setting here (not
+    # imported from crawler/) since this service and the crawler are separate
+    # deployables with independently-injected env vars in production.
+    GOOGLE_API_KEY: str = ""
+    # BMKG's adm4 (kelurahan-level) codes to poll for active weather warnings, used to
+    # ground the Harm (H) classifier - see app/services/hazard_context_service.py.
+    # Only one code is verified so far (Kemayoran, central Jakarta); extend against
+    # Kepmendagri 100.1.1-6117/2022 as more are confirmed rather than guessed.
+    BMKG_ADM4_CODES: list[str] = Field(default_factory=lambda: ["31.71.03.1001"])
+
     @property
     def is_production(self) -> bool:
         return self.ENV.lower() in {"prod", "production"}

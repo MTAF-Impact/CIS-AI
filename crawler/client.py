@@ -23,6 +23,16 @@ class AIServiceClient:
             fault_lines = response.json()
         return [f"{fl['grievance_theme']}: {fl['description'] or ''}" for fl in fault_lines]
 
+    async def fetch_topic_names(self) -> list[str]:
+        """Active topic labels - used to seed YouTube search queries dynamically
+        (see main.py) so the query list grows with what the system is actually
+        tracking, instead of staying a fixed hand-picked list forever."""
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
+            response = await client.get("/api/v1/topics")
+            response.raise_for_status()
+            topics = response.json()
+        return [t["name"] for t in topics]
+
     async def submit_batch(self, items: list[dict]) -> dict:
         async with httpx.AsyncClient(
             base_url=self._base_url, timeout=120.0, headers=self._headers

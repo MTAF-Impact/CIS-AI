@@ -13,6 +13,7 @@ from crawler.client import AIServiceClient
 from crawler.config import get_settings
 from crawler.fetchers.rss import fetch_rss_candidates
 from crawler.fetchers.telegram import fetch_telegram_candidates
+from crawler.fetchers.youtube import fetch_youtube_candidates
 from crawler.relevance_filter import RelevanceFilter
 
 logging.basicConfig(
@@ -52,6 +53,21 @@ async def run(dry_run: bool) -> None:
         settings.TELEGRAM_CHANNELS,
         settings.CRAWL_WINDOW_HOURS,
     )
+
+    topic_queries = [f"{name} jakarta" for name in await ai_client.fetch_topic_names()]
+    # Static seed queries first (guaranteed present even with zero topics yet -
+    # cold start), then topic-derived ones, de-duplicated, capped to protect quota.
+    youtube_queries = list(dict.fromkeys(settings.YOUTUBE_SEARCH_QUERIES + topic_queries))
+    youtube_queries = youtube_queries[: settings.YOUTUBE_MAX_QUERIES]
+
+    logger.info(
+        "Fetching YouTube (%d queries: %d static + %d topic-derived, capped at %d)...",
+        len(youtube_queries),
+        len(settings.YOUTUBE_SEARCH_QUERIES),
+        len(topic_queries),
+        settings.YOUTUBE_MAX_QUERIES,
+    )
+    candidates += await fetch_youtube_candidates(settings.GOOGLE_API_KEY, youtube_queries)
     logger.info("Fetched %d raw candidates", len(candidates))
 
     candidates = [c for c in candidates if relevance.location_matches(c.text)]
