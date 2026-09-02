@@ -1,7 +1,8 @@
 """Seed realistic Jakarta demo data: 4 fault lines, 13 posts across 4 Existing claims,
-2 predicted Non-Existing claims. Runs the full production pipeline: embed -> classify ->
-persist -> cluster -> score -> cache activity. Post text is English-only to match the
-embedding model.
+2 predicted Non-Existing claims, and one coordinated network (F5 demo data, via
+app/services/coordination/demo_seed.py). Runs the full production pipeline: embed ->
+classify -> persist -> cluster -> score -> cache activity. Post text is English-only
+to match the embedding model.
 
 Usage:
     uv run python scripts/seed_demo_data.py
@@ -17,11 +18,13 @@ from app.core.config import settings
 from app.core.database import AsyncSessionLocal, Base, engine
 from app.core.logging_config import configure_logging
 from app.models.content import ContentItem
+from app.models.coordination import DetectionRun
 from app.models.enums import ContentSource, MoralFoundation
 from app.models.fault_line import FaultLine
 from app.models.policy import Policy
 from app.services.claim_prediction_service import predict_non_existing_claim
 from app.services.clustering_service import cluster_unclustered_content
+from app.services.coordination import demo_seed, pipeline
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.llm_client import LLMClient, get_llm_client
 from scripts._backend_guard import refuse_if_backend_connected
@@ -226,6 +229,17 @@ async def ensure_schema() -> None:
 
 async def clear_demo_data(session) -> None:
     # FK-safe order. admin_settings is left untouched - not demo content.
+    # F5 tables first (children before coordinated_network/detection_run/account).
+    await session.execute(text("DELETE FROM evidence_snapshot"))
+    await session.execute(text("DELETE FROM network_evidence_post"))
+    await session.execute(text("DELETE FROM network_burst_bin"))
+    await session.execute(text("DELETE FROM network_claim_link"))
+    await session.execute(text("DELETE FROM network_account"))
+    await session.execute(text("DELETE FROM network_edge"))
+    await session.execute(text("DELETE FROM offtopic_cluster"))
+    await session.execute(text("DELETE FROM coordinated_network"))
+    await session.execute(text("DELETE FROM detection_run"))
+    await session.execute(text("DELETE FROM account"))
     await session.execute(text("DELETE FROM content_items"))
     await session.execute(text("DELETE FROM claim_alerts"))
     await session.execute(text("DELETE FROM claim_score_snapshots"))
@@ -349,6 +363,20 @@ async def main() -> None:
             result.claims_created,
             result.claims_updated,
             result.content_items_clustered,
+        )
+
+        logger.info("Seeding a coordinated network (F5 demo data)...")
+        _, run, run_kwargs = await demo_seed.generate_demo_coordinated_network(
+            session, llm, embedder, topic_hint="ERP congestion pricing backlash"
+        )
+        await pipeline.run_detection(run_id=run.id, session_factory=AsyncSessionLocal, **run_kwargs)
+        # populate_existing=True forces a fresh read - run_detection committed this
+        # row through a *different* session, so this session's identity map still
+        # holds the stale pending-status object from create_pending_run otherwise.
+        completed = await session.get(DetectionRun, run.id, populate_existing=True)
+        logger.info(
+            "Coordinated network detection run %s finished with status=%s",
+            run.id, completed.status,
         )
 
         logger.info(

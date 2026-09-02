@@ -522,6 +522,24 @@ full shape as `GET /claims/{id}` for an existing claim.
 
 **503:** no LLM key.
 
+### `POST /admin/generate-coordinated-network`
+
+Demo/testing tool, not part of the backend's real F5 contract below — synthesizes a
+coordinated-looking content burst and runs it through the real detection pipeline.
+See `docs/COORDINATION.md`'s "Demo/testing tooling" section for the generator
+details and why the result typically scores Low confidence.
+
+**Query params:** `claim_id` (uuid \| null) — attach the burst to an existing
+Existing claim; omitted creates a new demo claim first (same generator as
+`/admin/generate-generic-claim`, plus `topic_hint`). `topic_hint` (string \| null) —
+only used when `claim_id` is omitted.
+
+**202** (`GenerateCoordinatedNetworkResponse`): `{"run_id": "<uuid>", "status":
+"pending", "claim_id": "<uuid>"}`. The `detection_run` row already exists at this
+point — poll it directly, same as `POST /api/v1/detection/runs` below.
+
+**404:** `claim_id` doesn't resolve to an Existing claim. **503:** no LLM key.
+
 ---
 
 ## Detection — F5 pipeline trigger + purge
