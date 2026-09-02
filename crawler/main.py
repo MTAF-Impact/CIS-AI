@@ -36,6 +36,14 @@ def _top_n_per_source(candidates: list[Candidate], top_n: int) -> list[Candidate
 
 async def run(dry_run: bool) -> None:
     settings = get_settings()
+    # YouTube is a required source, not an optional one - fail loudly and immediately
+    # (before wasting time on RSS/Telegram/exemplars) rather than silently returning
+    # zero YouTube candidates, which would go unnoticed run after run.
+    if not settings.GOOGLE_API_KEY:
+        raise RuntimeError(
+            "GOOGLE_API_KEY is required (YouTube Data API v3) - set it before running "
+            "the crawler. See docs/CRAWLER.md."
+        )
     ai_client = AIServiceClient(settings)
 
     logger.info("Fetching relevance exemplars from %s", settings.AI_SERVICE_URL)

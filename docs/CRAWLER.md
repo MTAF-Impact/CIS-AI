@@ -1,10 +1,20 @@
 # Crawler
 
-A separate, stateless Cloud Run **Job** (not a Service) that feeds real content into the
-AI service, replacing/supplementing `/ingest/generate-synthetic`. Lives in `crawler/`,
-its own dependency group and `Dockerfile.crawler` - see `ARCHITECTURE.md` for how this
-fits the rest of the system and why it talks to the AI service only over HTTP (no direct
-Postgres access, same rule as the Go backend).
+Feeds real content into the AI service, replacing/supplementing
+`/ingest/generate-synthetic`. Lives in `crawler/`, its own dependency group (`uv sync
+--group crawler`) - see `ARCHITECTURE.md` for why it talks to the AI service only over
+HTTP (no direct Postgres access, same rule as the Go backend), even though it now runs
+inside that same service's process (see Deployment below).
+
+**Deployment shape**: originally designed as a separate, stateless Cloud Run Job
+triggered by Cloud Scheduler. For the hackathon build this was folded into the main AI
+service instead - one deployment, one image, triggered via `POST /admin/run-crawler` -
+since standing up a second Cloud Run resource (Job + Scheduler + its own build
+pipeline) wasn't worth the operational overhead for this stage. If this ever needs to
+split back out (e.g. the crawler's resource usage starts contending with the AI
+service's own), see git history around this doc's "merged into the AI service" section
+for the original standalone-Job setup (a separate `Dockerfile.crawler` + Cloud Run Job
++ Cloud Scheduler) to resurrect rather than redesigning from scratch.
 
 ```
 crawler/
@@ -40,16 +50,15 @@ quality before ever writing anything - see `ARCHITECTURE.md`'s verification sect
 
 | Var | Default | Notes |
 |---|---|---|
-| `AI_SERVICE_URL` | `http://localhost:8000` | |
+| `AI_SERVICE_URL` | `http://localhost:8000` | Only matters for **direct CLI use** (`python -m crawler.main`, local dev). Via `POST /admin/run-crawler` (the deployed path), this is force-overridden to `http://localhost:$PORT` regardless of what's set - don't configure it on Cloud Run, it's ignored there. |
 | `AI_SERVICE_API_KEY` | `""` | Sent as `X-API-Key` if set - must match the AI service's own `AI_SERVICE_API_KEY`. |
 | `RSS_FEED_URLS` | `[]` | JSON list of feed URLs. Inherently a fixed publisher list (RSS has no query/topic API to search against, unlike YouTube) - "wider" here means verifying more outlet feeds, not making it algorithmically dynamic. 5 verified as of this doc: Antara (terkini + metro), CNN Indonesia, Republika, Tempo. Kompas, Detik, and beritajakarta.id's feed paths didn't resolve on a quick check - not guessed at, see `docs/SOURCES.md`. |
 | `TELEGRAM_CHANNELS` | `[]` | JSON list of public channel usernames. |
 | `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | unset | From my.telegram.org - see Phase 2. |
 | `TELEGRAM_SESSION_STRING` | `""` | From a one-time interactive login - see Phase 2. Telegram fetch is skipped entirely (not an error) until this is set. |
-| `GOOGLE_API_KEY` | `""` | console.cloud.google.com -> enable "YouTube Data API v3" -> Credentials -> API key. Self-serve, free, 10,000 quota units/day. Shared with the main AI service's own `GOOGLE_API_KEY` (`app/core/config.py`) - same project, "Fact Check Tools API" also enabled on it there. Skipped entirely until set. |
+| `GOOGLE_API_KEY` | `""` | **Required** - console.cloud.google.com -> enable "YouTube Data API v3" -> Credentials -> API key. Self-serve, free, 10,000 quota units/day. `run()` (and `POST /admin/run-crawler`) refuse to start without it - YouTube is a required source, not a best-effort one. Shared with the main AI service's own `GOOGLE_API_KEY` (`app/core/config.py`), which stays optional there - same project, "Fact Check Tools API" also enabled on it. |
 | `YOUTUBE_SEARCH_QUERIES` | `[]` | Fixed floor/seed queries, always searched (covers cold start before any topics exist). Real breadth is dynamic: `main.py` calls `AIServiceClient.fetch_topic_names()` (`GET /api/v1/topics`) and appends one `"{topic name} jakarta"` query per active topic on top of these, so the query list grows with what the system is actually tracking instead of staying hand-picked forever. |
 | `YOUTUBE_MAX_QUERIES` | `15` | Caps total queries (static + topic-derived) per run - each costs 100 quota units (`search.list`) plus ~1/video comment page. |
-| `YOUTUBE_SEARCH_QUERIES` | `[]` | JSON list of search terms (e.g. `["banjir jakarta", "kualitas udara jakarta"]`). Each query costs 100 quota units (`search.list`) + ~1 unit per comment page fetched. |
 | `TOP_N_PER_SOURCE` | `20` | Popularity-ranked cap per source, per run. |
 | `CRAWL_WINDOW_HOURS` | `6.0` | How far back Telegram messages are considered. |
 | `RELEVANCE_THRESHOLD` | `0.35` | Cosine similarity cutoff against `fault_lines` exemplars. Tune via `--dry-run`. |
@@ -69,15 +78,20 @@ quality before ever writing anything - see `ARCHITECTURE.md`'s verification sect
 
 Both lists go into `RSS_FEED_URLS`/`TELEGRAM_CHANNELS` (JSON-encoded env vars).
 
-## Deployment (bundled with the AI service redeploy, not incremental)
+## Deployment - merged into the AI service (current)
 
-1. Set `AI_SERVICE_API_KEY` on the AI service's own Cloud Run env - this is what
-   actually turns on the auth check already wired on `POST /ingest`/`/ingest/batch`.
-2. Build + push `Dockerfile.crawler` to Artifact Registry.
-3. Create the `cis-crawler` Cloud Run **Job** from that image, with `AI_SERVICE_URL`,
-   the same `AI_SERVICE_API_KEY`, and the Telegram secret wired in.
-4. Create a Cloud Scheduler cron job targeting the Cloud Run Jobs execute API (OIDC
-   auth) at the agreed cadence.
-5. Trigger the Job manually once first (don't wait for the schedule) - confirm via
-   `GET /claims/existing` that real data flows through end to end before enabling the
-   cadence.
+The crawler ships inside the AI service's own image now (`Dockerfile` installs
+`--group crawler` too) - no separate Cloud Run resource.
+
+1. Redeploy the AI service as normal (whatever pipeline already builds/deploys it -
+   e.g. a PR merge to `main` if Cloud Build continuous deployment is set up).
+2. Set the crawler's env vars on that **same** Cloud Run service/revision -
+   `RSS_FEED_URLS`, `GOOGLE_API_KEY`, `YOUTUBE_SEARCH_QUERIES`, and Telegram's if
+   configured (see the table above). Don't set `AI_SERVICE_URL` - the endpoint below
+   resolves it to itself (`http://localhost:$PORT`) at call time.
+3. Trigger a run: `POST /admin/run-crawler` (no body, 202 response, runs in the
+   background - watch Cloud Logging for progress/errors, same log lines as a local
+   `--dry-run`). Trigger this manually before a demo, or point a Cloud Scheduler HTTP
+   job at it (with OIDC auth, same as any other authenticated Cloud Run endpoint) for
+   a recurring cadence - much simpler than the old Job+Scheduler combination since
+   it's just a normal HTTP route on an existing service now.

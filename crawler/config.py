@@ -21,10 +21,11 @@ class CrawlerSettings(BaseSettings):
     TELEGRAM_CHANNELS: list[str] = Field(default_factory=list)
 
     # console.cloud.google.com -> enable "YouTube Data API v3" on this project. One
-    # key, shared with the main AI service's GOOGLE_API_KEY (app/core/config.py) -
-    # same Google Cloud project, "Fact Check Tools API" also enabled on it there.
-    # Skipped entirely (like Telegram) until both this and at least one query
-    # (static or topic-derived) are available.
+    # key, shared with the main AI service's GOOGLE_API_KEY (app/core/config.py,
+    # where it stays optional) - same Google Cloud project, "Fact Check Tools API"
+    # also enabled on it there. REQUIRED here - unlike Telegram, YouTube is not a
+    # best-effort source; main.py's run() raises immediately if this is unset rather
+    # than silently returning zero YouTube candidates.
     GOOGLE_API_KEY: str = ""
     # Fixed floor/seed queries - always searched. Real breadth comes from
     # main.py appending one query per active AI-service topic on top of these

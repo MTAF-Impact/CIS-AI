@@ -54,7 +54,7 @@ never reclassified later:
 | `first_caught_at` | `timestamptz` | No | — | For `existing`: `min(content_item.created_at)` across the founding cluster. For `non_existing`: the prediction timestamp (no content exists to derive it from). |
 | `reach_score` | `float` | Yes | `NULL` | **R**, 0–100. `existing` only — always `NULL` for `non_existing`. |
 | `velocity_score` | `float` | Yes | `NULL` | **V**, 0–100. `existing` only. |
-| `falseness_score` | `float` | Yes | `NULL` | **F**, 0–100, or `NULL` if no confident match against the (currently empty) `official_sources` corpus. **`NULL` is a real, expected, long-term state, not an error** — see `SCORING.md`. |
+| `falseness_score` | `float` | Yes | `NULL` | **F**, 0–100, or `NULL` if neither the `official_sources` corpus match nor the live Google Fact Check API fallback finds anything. **`NULL` is a real, expected state for a novel never-fact-checked claim, not an error** — see `SCORING.md`. |
 | `harm_score` | `float` | Yes | `NULL` | **H**, 0–100. Weighted composite of the 4 sub-scores below. |
 | `harm_public_safety` | `float` | Yes | `NULL` | H sub-score, 0–100, AI-classified. |
 | `harm_institutional_trust` | `float` | Yes | `NULL` | H sub-score, 0–100, AI-classified. |
@@ -292,11 +292,18 @@ See `app/models/fault_line.py`.
 
 ## `official_sources`
 
-The verified reference corpus Falseness (F) scoring matches claims against. **Starts
-empty** — no document has been loaded yet in this deployment, so `falseness_score`
-currently reads `NULL` for every claim. Populate later via
-`scripts/load_official_sources.py` (not yet written) once real government
-fact-check/official-statement documents are supplied. Deliberately kept **separate** from
+The verified reference corpus Falseness (F) scoring matches claims against. Seeded from
+TurnBackHoax.id's public feed via `scripts/seed_debunk_corpus.py` (safe to re-run
+periodically - skips rows whose `source_url` is already stored) - see `docs/SOURCES.md`
+for why this substitutes for the originally-planned `nlp-brin-id/fakenews-mafindo`
+HuggingFace dataset (turned out to be gated). `content`/`title` hold the **hoax
+claim text itself** (original Indonesian), not a corrected fact - a new claim needs
+to resemble the false narrative to match, not its correction. `embedding` is computed
+from an **English translation** of that claim text, not the raw Indonesian - the
+embedding model is English-only, and embedding the untranslated text measurably
+degraded match quality (a claim closely paraphrasing a real seeded hoax topic scored
+0.51 similarity pre-fix, just under `DEFAULT_MATCH_THRESHOLD` 0.55 - a real match
+silently missed; 0.90 after). Deliberately kept **separate** from
 `policies` — this is an independently-managed reference corpus (fact-checks, official
 statements) with no guaranteed 1:1 relationship to a specific Policy row; conflating them
 would force every debunk-reference document to also be a "Policy". See

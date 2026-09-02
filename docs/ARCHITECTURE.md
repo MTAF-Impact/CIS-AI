@@ -87,8 +87,11 @@ this pattern is what makes that guarantee hold for background work too.
 
 Background-task-scheduling endpoints today: `POST /ingest`, `POST /ingest/batch`
 (clustering), `POST /policies` (matchmaking), `POST /matchmaking/policies` (matchmaking,
-Go-triggered), `POST /api/v1/detection/runs` (F5 detection, single or multi-claim
-batch — see `COORDINATION.md`).
+Go-triggered), `POST /api/v1/detection/runs` and `POST /admin/generate-coordinated-network`
+(F5 detection, single or multi-claim batch — see `COORDINATION.md`), and
+`POST /admin/run-crawler` (runs `crawler/main.py` in-process — see `CRAWLER.md`; this
+one doesn't need the `session_factory`/`llm`/`embedder` threading above, since the
+crawler talks to the AI service over its own HTTP client rather than a DB session).
 
 ## Module map
 
@@ -140,7 +143,14 @@ app/
     ├── document_extraction.py                  # PDF/.docx text extraction
     ├── admin_service.py                         # F4 threshold + one-click demo-claim generation
     ├── cib_detector.py                           # deterministic CIB heuristic — superseded by coordination/
-    └── coordination/                              # F5 — full detection pipeline, see COORDINATION.md
+    ├── coordination/                              # F5 — full detection pipeline, see COORDINATION.md
+    ├── fact_check_client.py                       # live Google Fact Check API fallback for Falseness (F)
+    └── hazard_context_service.py                   # live BMKG grounding for Harm (H) classification
+
+crawler/                            # RSS/YouTube/Telegram collectors - own dependency
+                                     #   group, ships in this same image/deployment,
+                                     #   triggered in-process via POST /admin/run-crawler
+                                     #   (app/api/v1/endpoints/admin.py). See CRAWLER.md.
 ```
 
 See `MODULES.md` for what every one of these files does at the function level.

@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.config import settings
@@ -36,6 +36,14 @@ class ContentItem(Base):
     # Dedup key for automated sources, e.g. "telegram:<channel_id>:<message_id>" or
     # "rss:<feed_url>:<guid>". Null (and unenforced) for manual/synthetic ingestion.
     external_ref: Mapped[str | None] = mapped_column(String(512), unique=True, nullable=True)
+
+    # F5's w_amp (co-amplification) input - see SignalPost.outbound_urls in
+    # app/services/coordination/types.py. No real fetcher populates this yet (no
+    # platform we've wired up exposes reshare/quote/reply targets or outbound links
+    # at ingest) - it exists so app/services/coordination/demo_seed.py can simulate
+    # a complete-signal scenario through the real, unmodified pipeline rather than a
+    # separate demo-only code path. NULL/empty is the honest default for real content.
+    outbound_urls: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
     # LLM analysis output
     outrage_score: Mapped[float | None] = mapped_column(Float, nullable=True)

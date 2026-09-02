@@ -91,19 +91,25 @@ V = 100 × sigmoid(V_zscore)                            # squashed to [0, 100]
 *How confidently the claim can be confirmed false, against verified official sources.*
 
 ```
-F = SimilarityToKnownDebunk × 100     (or NULL if no confident match)
+F = SimilarityToKnownDebunk × 100     (or NULL if neither path below finds anything)
 ```
 
-- `SimilarityToKnownDebunk` — top cosine-similarity match between the claim's own
-  embedding and every `official_sources.embedding` (pgvector `cosine_distance`,
-  `similarity = 1 - distance`), threshold `0.55` (`DEFAULT_MATCH_THRESHOLD`).
-- **`official_sources` starts empty in this deployment** (no document has been loaded
-  yet — see `DATA_MODEL.md`). Until real fact-check/official-statement documents are
-  supplied via `scripts/load_official_sources.py`, `F` reads `NULL` for essentially every
-  claim. **This is expected, not a bug.**
-- If no match clears the threshold (or the corpus is empty), **F is `NULL`, never `0`.**
-  `0` would wrongly assert "confirmed true"; `NULL` means "no signal either way," which
-  is handled explicitly in the composite formula below.
+Two paths, tried in order (`app/services/falseness_service.py`):
+
+1. `SimilarityToKnownDebunk` — top cosine-similarity match between the claim's own
+   embedding and every `official_sources.embedding` (pgvector `cosine_distance`,
+   `similarity = 1 - distance`), threshold `0.55` (`DEFAULT_MATCH_THRESHOLD`).
+   `official_sources` is seeded from TurnBackHoax.id's public feed
+   (`scripts/seed_debunk_corpus.py`, safe to re-run periodically) — see `DATA_MODEL.md`
+   and `docs/SOURCES.md`.
+2. If that misses, a live Google Fact Check Tools API lookup on the claim's own text
+   (`app/services/fact_check_client.py`) — any matching `ClaimReview` with a
+   false-reading `textualRating` scores a fixed `LIVE_FACT_CHECK_MATCH_SCORE` (75.0),
+   since it's a real verified verdict rather than a modelled similarity. Silently
+   skipped whenever `GOOGLE_API_KEY` is unset.
+- If neither path finds anything, **F is `NULL`, never `0`.** `0` would wrongly assert
+  "confirmed true"; `NULL` means "no signal either way," which is handled explicitly in
+  the composite formula below.
 
 ### H — Harm Severity
 
@@ -118,6 +124,13 @@ rubric (0–20 / 21–40 / 41–60 / 61–80 / 81–100, each with concrete exam
 see the full text in `app/services/llm_client.py::HARM_CLASSIFICATION_SYSTEM_PROMPT`),
 then human-confirmable/overridable via `PATCH /claims/{id}/harm/confirm`
 (`Claim.harm_human_confirmed`).
+
+The classification prompt is optionally grounded in live BMKG weather-hazard context
+(`app/services/hazard_context_service.fetch_bmkg_context`, threaded through as
+`classify_harm`'s `hazard_context` param) — a claimed hazard that contradicts an
+active forecast supports a higher `public_safety` score than the same claim text with
+no grounding available. Silently omitted from the prompt whenever unreachable/no
+`BMKG_ADM4_CODES` configured, never padded with a placeholder. See `docs/SOURCES.md`.
 
 `PolicyDisruption` is deliberately the lowest-weighted sub-score, and scored
 *conservatively and narrowly* — only the claim's concrete effect on policy execution
@@ -149,14 +162,13 @@ Weight rationale: F and H carry the highest combined weight (0.60) — this is a
 risk-triage tool, not a virality tracker. R+V (0.30 combined) capture urgency of spread.
 EI (0.10) is weighted lowest.
 
-**If F is `NULL`** (no confident corpus match — the common case while `official_sources`
-is empty): F's 0.30 weight is **dropped and the remaining weights renormalize** to sum to
-1.0 —
+**If F is `NULL`** (neither the corpus match nor the live Fact Check API fallback finds
+anything — still common for a novel claim with no prior fact-check): F's 0.30 weight is
+**dropped and the remaining weights renormalize** to sum to 1.0 —
 ```
 ClaimScore = (0.15·R + 0.15·V + 0.30·H + 0.10·EI) / 0.70
 ```
-— rather than treating missing F as `0`, which would wrongly assert "confirmed true" and
-systematically depress every claim's score while the corpus is empty.
+— rather than treating missing F as `0`, which would wrongly assert "confirmed true".
 
 Bounded `[0, 100]` by construction (weights sum to 1.0, every input is already `[0,100]`);
 `scoring_engine.claim_score()` still clamps as a safety net.

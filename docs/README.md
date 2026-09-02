@@ -7,13 +7,14 @@ with **API Reference** and **Go Integration**.
 | Doc | What's in it |
 |---|---|
 | [`API_REFERENCE.md`](./API_REFERENCE.md) | **Every** endpoint: method, path, auth, full request/response schema field-by-field, status codes, error cases, example JSON. Start here to consume this API. |
-| [`GO_INTEGRATION.md`](./GO_INTEGRATION.md) | The 3-flow contract with the Go backend — expanded from the backend repo's own `AI-INTEGRATION.md` with implementation-level detail on this side: exact code locations, retry/idempotency guarantees, error handling, config. |
+| [`GO_INTEGRATION.md`](./GO_INTEGRATION.md) | The full HTTP contract with the Go backend (8 backend→AI + 2 AI→backend flows as of PRD v1.5) — expanded from the backend repo's own `AI-INTEGRATION.md` with implementation-level detail on this side: exact code locations, retry/idempotency guarantees, error handling, config. |
 | [`DATA_MODEL.md`](./DATA_MODEL.md) | Every table this service owns, column by column: types, nullability, defaults, FKs, what each field means and when it's populated. The ownership boundary with the Go backend's `cis_*` tables. |
 | [`SCORING.md`](./SCORING.md) | The full Claim Scoring System reference — every formula, every weight, every edge case (dormancy, missing Falseness, reliability threshold), when scores are (re)computed. |
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Tech stack, request lifecycle, the background-task pattern (read this before adding any async work), module map, key design decisions. |
 | [`MODULES.md`](./MODULES.md) | Function-by-function walkthrough of every file in `app/services/` — what it does, what calls it, what it calls. |
 | [`SETUP.md`](./SETUP.md) | Local dev, every environment variable, seeding/schema-reset scripts, testing, CI/CD, deployment target. |
-| [`CRAWLER.md`](./CRAWLER.md) | The `crawler/` Cloud Run Job that feeds real content into `/ingest/batch` — env vars, local dry-run, manual setup steps, deployment. |
+| [`CRAWLER.md`](./CRAWLER.md) | The `crawler/` module that feeds real content into `/ingest/batch` (RSS, YouTube, Telegram) — env vars, local dry-run, manual setup steps. Ships inside the AI service's own deployment, triggered via `POST /admin/run-crawler`. |
+| [`SOURCES.md`](./SOURCES.md) | The data-source registry: what's wired up (and where), what's deferred and why, feasibility/impact of every candidate source from the Data Pipeline & Source Spec v1.0 audit. |
 | [`COORDINATION.md`](./COORDINATION.md) | F5 — Coordinated-Network Detector: the detection pipeline (Stages 0-6), the one run-trigger endpoint, the 9-table data model, config, and governance — scoped to what this service owns per the backend ownership split (list/detail/review/allowlist/reports/F4-config moved to the backend). |
 | [`F5_TRACEABILITY.md`](./F5_TRACEABILITY.md) | PRD v1.4 Section 10 requirements mapped to current status — pipeline stages still traced item-by-item; US43-64 marked moved-to-backend now that ownership split. |
 

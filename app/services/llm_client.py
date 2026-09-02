@@ -17,6 +17,7 @@ from app.schemas.analysis import (
     DebunkSegmentBatchSchema,
     DebunkSegmentSchema,
     HarmClassificationSchema,
+    NetworkLabelSchema,
     NonExistingClaimPredictionSchema,
     PolicyClaimMatchBatchSchema,
     StanceBatchSchema,
@@ -107,6 +108,23 @@ Given a sample of posts that all express the same underlying claim, produce:
   "Waste & Pollution" already exists, do not output "Waste & Water Pollution" for \
   another waste/pollution claim. Only propose a new label when none of the existing \
   ones genuinely fit.
+"""
+
+NETWORK_LABEL_SYSTEM_PROMPT = """\
+You are labeling a detected coordinated-posting-behavior network for a civic \
+decision-support system's internal reporting (PRD Section 10, F5). This is a \
+pattern description, not an accusation - coordinated posting behaviour has \
+legitimate explanations (organised civic campaigns, newsroom syndication, community \
+mobilisation), and this label must NEVER assert automation, inauthenticity, bad \
+faith, or the identity/affiliation of any account - that determination is a human \
+reviewer's job, not this system's.
+
+Given the claim these accounts are all posting in support of, and a sample of their \
+posts, produce a short (3-8 word) neutral, descriptive label for this network - \
+naming WHAT topic/claim the coordinated activity centers on, never WHO is behind it \
+or WHY. Good: "ERP Road Pricing Amplification Cluster", "Flood Warning Claim Push". \
+Bad: "Bot Network Spreading Misinformation", "Fake Accounts Attacking Policy" \
+(asserts identity/intent this system cannot determine).
 """
 
 STANCE_SYSTEM_PROMPT = """\
@@ -409,6 +427,22 @@ class LLMClient:
             system_instruction=CLAIM_SUMMARY_SYSTEM_PROMPT,
             schema=ClaimSummarySchema,
         )
+
+    async def generate_network_label(
+        self, claim_statement: str, sample_texts: list[str]
+    ) -> str:
+        """Short neutral label for a detected coordinated network (PRD 10.5.5/10.6 -
+        coordinated_network.label). See NETWORK_LABEL_SYSTEM_PROMPT for the
+        governance constraint this must respect (never assert automation/bad-faith/
+        identity, PRD 10.9.1)."""
+        joined = "\n---\n".join(sample_texts[:10])
+        prompt = f"Claim being supported:\n{claim_statement}\n\nSample posts:\n{joined}"
+        result = await self._generate_structured(
+            prompt=prompt,
+            system_instruction=NETWORK_LABEL_SYSTEM_PROMPT,
+            schema=NetworkLabelSchema,
+        )
+        return result.label
 
     async def classify_stance(self, claim_statement: str, post_text: str) -> Stance:
         """Classify a single post's stance toward an already-known claim."""

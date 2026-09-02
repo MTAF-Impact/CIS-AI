@@ -21,6 +21,7 @@ from app.schemas.coordination_network import (
     PurgeSnapshotsResponse,
 )
 from app.services.coordination import governance, pipeline
+from app.services.llm_client import LLMClient, get_llm_client
 
 router = APIRouter(prefix="/detection", tags=["detection"])
 
@@ -36,6 +37,7 @@ async def trigger_detection_run(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     session_factory: async_sessionmaker = Depends(get_session_factory),
+    llm: LLMClient = Depends(get_llm_client),
 ) -> DetectionRunResponse:
     """PRD 10.5.8 - all three trigger modes (scheduled/velocity/on-demand) are the
     backend's decision now; this just runs the pipeline when asked. The
@@ -49,7 +51,13 @@ async def trigger_detection_run(
     Depends() would force every cold container's first /runs call to block
     the 202 response on a full model load/download - this endpoint hit 503s in
     production for exactly that reason before this fix. run_detection resolves
-    it lazily itself once the response is already on its way back."""
+    it lazily itself once the response is already on its way back. LLMClient
+    construction is cheap (no local model to load - see its own docstring), so
+    it doesn't carry that risk and stays a normal Depends() here; passed through
+    explicitly rather than letting run_detection default it, so tests' FakeLLMClient
+    override actually takes effect on this codepath too (see run_detection's
+    docstring for why a bare get_llm_client() call inside the background task
+    would silently bypass that override)."""
     run = await pipeline.create_pending_run(db, payload)
     background_tasks.add_task(
         pipeline.run_detection,
@@ -60,6 +68,7 @@ async def trigger_detection_run(
         parameters=payload.parameters,
         exclusions=payload.exclusions,
         session_factory=session_factory,
+        llm=llm,
     )
     # db.refresh() reads status back as a plain str (String column, no native enum
     # type) rather than the DetectionRunStatus instance it was created with.

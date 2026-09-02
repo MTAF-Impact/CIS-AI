@@ -26,6 +26,13 @@ class ClaimSummarySchema(BaseModel):
     topic_label: str = Field(max_length=255)
 
 
+class NetworkLabelSchema(BaseModel):
+    """A short, neutral, human-readable label for a detected coordinated network -
+    matches coordinated_network.label's String(255) column."""
+
+    label: str = Field(max_length=255)
+
+
 class StanceSchema(BaseModel):
     """Structured output contract for a single post's stance relative to a claim."""
 

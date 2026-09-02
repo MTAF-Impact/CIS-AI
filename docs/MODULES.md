@@ -39,6 +39,7 @@ Pydantic schema in `app/schemas/analysis.py`):
 | `predict_non_existing_claim(policy_title, policy_description, grounding_context)` | Predicted claim statement, topic, attack angle, framing, and the Prebunk explainer. | `claim_prediction_service.predict_non_existing_claim` |
 | `generate_synthetic_posts(count, topic_hint, grounding_context)` | Fabricates realistic Jakarta posts (prototype crawler stand-in). | `ingestion.py`'s `/ingest/generate-synthetic`, `admin_service.generate_demo_existing_claim` |
 | `confirm_policy_claim_matches(policy_title, policy_description, candidate_claim_statements)` | One boolean per candidate claim — is it genuinely about this policy? Raises `ValueError` on a count mismatch. | `policy_matchmaking_service._run` |
+| `generate_network_label(claim_statement, sample_texts)` | Short (3-8 word) neutral label for a detected coordinated network (`coordinated_network.label`) — naming WHAT topic the activity centers on, never WHO/WHY (PRD 10.9.1 hard rule against asserting automation/bad-faith/identity). | `app/services/coordination/pipeline.py::_persist_network`, via `_generate_network_label`'s deterministic-fallback wrapper |
 
 `get_llm_client()` — `@lru_cache`-singleton factory, the `Depends()` target everywhere.
 

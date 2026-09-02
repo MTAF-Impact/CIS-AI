@@ -43,7 +43,7 @@ from app.models.coordination import (
     NetworkEvidencePost,
     OfftopicCluster,
 )
-from app.models.enums import ClaimType, DetectionRunStatus, Stance
+from app.models.enums import ClaimType, ContentSource, DetectionRunStatus, Stance
 from app.schemas.coordination_network import (
     DetectionRunRequest,
     DetectorParameters,
@@ -74,6 +74,7 @@ from app.services.coordination.signals.provenance import compute_provenance_simi
 from app.services.coordination.signals.structural import compute_structural_overlap
 from app.services.coordination.signals.temporal import compute_temporal_synchrony
 from app.services.coordination.types import SignalAccount, SignalPost
+from app.services.llm_client import LLMClient
 from app.services.multilingual_embedding_service import (
     MultilingualEmbeddingService,
     get_multilingual_embedding_service,
@@ -142,6 +143,13 @@ async def _load_candidate_posts(
                 ContentItem.created_at >= window_start,
                 ContentItem.created_at <= window_end,
                 ContentItem.author_id.is_not(None),
+                # News sources are excluded from F5 candidate scope entirely (Data
+                # Pipeline & Source Spec v1.0, D6): article timestamps are coarse and
+                # legitimate syndication means outlets publish near-identical text
+                # simultaneously by design - exactly what w_time/w_text would read as
+                # coordination. Only RSS is a live news-type source today; RADIO/
+                # FORUM/OTHER aren't populated by any real fetcher yet.
+                ContentItem.source != ContentSource.RSS,
             )
         )
     ).scalars().all()
@@ -152,6 +160,7 @@ async def _load_candidate_posts(
             text=item.text_en or item.text,
             created_at=item.created_at,
             source=item.source,  # stored as a plain string column, not a native enum type
+            outbound_urls=tuple(item.outbound_urls or ()),
         )
         for item in rows
     ]
@@ -203,6 +212,39 @@ async def _get_or_create_accounts(
     return mapping
 
 
+async def _load_account_provenance(
+    db: AsyncSession, platform_account_ids: set[str], platform: str = "unknown"
+) -> dict[str, SignalAccount]:
+    """Read-only lookup of whatever w_meta provenance already exists on an Account
+    row (from a prior detection run, or - today - only the demo generator, which is
+    the only writer of these fields; no real fetcher populates them yet). Missing
+    account -> not in the returned dict -> caller falls back to an all-fields-None
+    SignalAccount, i.e. today's existing "unavailable" behavior for every account no
+    prior run or the demo has ever touched. Never creates a row - that's still
+    _get_or_create_accounts's job, at persistence time."""
+    if not platform_account_ids:
+        return {}
+    existing = (
+        await db.execute(
+            select(Account).where(
+                Account.platform == platform, Account.platform_account_id.in_(platform_account_ids)
+            )
+        )
+    ).scalars().all()
+    return {
+        a.platform_account_id: SignalAccount(
+            account_id=a.platform_account_id,
+            handle=a.handle,
+            created_at_platform=a.created_at_platform,
+            profile_hash=a.profile_hash,
+            bio=a.bio,
+            declared_location=a.declared_location,
+            client_app=a.client_app,
+        )
+        for a in existing
+    }
+
+
 async def _load_recurrence_candidates(db: AsyncSession) -> list[RecurrenceCandidate]:
     rows = (
         await db.execute(
@@ -251,6 +293,7 @@ def _build_signals(
     embedder: MultilingualEmbeddingService,
     params: DetectorParameters,
     common_phrase_allowlist: set[str],
+    follower_sets: dict[str, set[str]] | None = None,
 ) -> dict[str, dict[tuple[str, str], float] | None]:
     return {
         "w_time": compute_temporal_synchrony(
@@ -266,7 +309,10 @@ def _build_signals(
         ),
         "w_amp": compute_co_amplification(posts),
         "w_meta": compute_provenance_similarity(accounts, half_life_hours=params.provenance_half_life_hours),
-        "w_struct": compute_structural_overlap(None),  # no follower-graph data source yet
+        # None for every real (backend-triggered) run - no follower-graph data
+        # source exists yet. Only ever non-None when demo_seed.py passes
+        # run_detection's synthetic_follower_sets, threaded through from there.
+        "w_struct": compute_structural_overlap(follower_sets),
     }
 
 
@@ -310,6 +356,25 @@ async def _persist_offtopic_cluster(
     )
 
 
+async def _generate_network_label(
+    llm: LLMClient | None, claim_statement: str, cluster_posts: list[SignalPost]
+) -> str:
+    """LLMClient.generate_network_label, with a deterministic fallback - never
+    blocks persistence on a missing/failed LLM call, matching the graceful-
+    degradation posture used everywhere else in this codebase (e.g.
+    clustering_service.build_claim_from_content_items's harm-classification try/
+    except)."""
+    fallback = f"Coordinated activity: {claim_statement}"[:255]
+    if llm is None:
+        return fallback
+    sample_texts = [p.text for p in cluster_posts[:10]]
+    try:
+        return await llm.generate_network_label(claim_statement, sample_texts)
+    except Exception:
+        logger.exception("Network label generation failed; using deterministic fallback")
+        return fallback
+
+
 async def _persist_network(
     db: AsyncSession,
     run_id: uuid.UUID,
@@ -332,15 +397,19 @@ async def _persist_network(
     comparison_account_ids: list[str],
     total_posts_by_account: dict[str, int],
     common_phrase_allowlist: set[str],
+    claim_statement: str,
+    llm: LLMClient | None,
 ) -> CoordinatedNetwork:
     snapshot = build_evidence_snapshot(
         community, cluster_posts, accounts, edges, embedder=embedder,
         common_phrase_allowlist=common_phrase_allowlist,
     )
     platforms = sorted({p.source for p in cluster_posts if p.source})
+    label = await _generate_network_label(llm, claim_statement, cluster_posts)
 
     network = CoordinatedNetwork(
         run_id=run_id,
+        label=label,
         coordination_score=metrics.coordination_score,
         sy=metrics.sy,
         du=metrics.du,
@@ -478,13 +547,42 @@ async def run_detection(
     exclusions: Exclusions,
     embedder: MultilingualEmbeddingService | None = None,
     session_factory: async_sessionmaker | None = None,
+    synthetic_follower_sets: dict[str, set[str]] | None = None,
+    platform_age_baseline_hours: list[float] | None = None,
+    llm: LLMClient | None = None,
 ) -> None:
     """Runs the full Stage 0-6 pipeline over every claim in claim_ids against the
     already-created `run_id` row (create_pending_run wrote it synchronously before
     the 202 response). One run, one or many claims - PRD 10.5.1 point 6: signals and
     cluster metrics remain computed per claim even in batch mode, so this loops
     internally rather than pooling candidates across claims (pooling is an optional
-    efficiency optimisation the PRD explicitly does not require)."""
+    efficiency optimisation the PRD explicitly does not require).
+
+    synthetic_follower_sets: w_struct's only wiring point, always None for the real
+    backend-triggered contract (POST /api/v1/detection/runs never passes it - no
+    follower-graph data source exists for any real platform we've wired up). Exists
+    so app/services/coordination/demo_seed.py can simulate a complete-signal
+    scenario through this exact function, keyed by account_id -> the set of
+    account_ids it "follows". Never persisted anywhere - purely an in-memory signal
+    input for the run it's passed to.
+
+    platform_age_baseline_hours: same demo-only story, for PR's age-percentile
+    sub-signal (cluster_metrics._age_percentile_inverted) - this service has no live
+    platform-wide account-age distribution to compare against, so that sub-signal is
+    unavailable (dropped from PR's average, not scored as 0) on every real run
+    unless a caller supplies one.
+
+    llm: used only to generate coordinated_network.label (see
+    LLMClient.generate_network_label) - falls back to a deterministic label built
+    from the claim statement when None or on any failure, never blocks detection.
+    Deliberately NOT auto-defaulted to get_llm_client() here the way embedder is
+    above - every real caller (trigger_detection_run, generate_coordinated_network,
+    scripts/seed_demo_data.py) must resolve and pass it explicitly (Depends() in the
+    two endpoints), same as every other background-task-scheduling endpoint in this
+    codebase. A bare get_llm_client() call from inside a background task bypasses
+    FastAPI's dependency_overrides entirely, which would silently make this the one
+    F5 code path hitting a real LLM in tests - see ARCHITECTURE.md's background-task
+    section for the historical bug this exact pattern already caused once."""
     embedder = embedder or get_multilingual_embedding_service()
     session_factory = session_factory or get_session_factory()
 
@@ -524,8 +622,15 @@ async def run_detection(
                 if len(selection.account_ids) < MIN_CANDIDATES_TO_RUN:
                     continue
 
-                signal_accounts = [SignalAccount(account_id=a, handle=a) for a in selection.account_ids]
-                signals = _build_signals(selection.posts, signal_accounts, embedder, parameters, common_phrases)
+                account_provenance = await _load_account_provenance(db, set(selection.account_ids))
+                signal_accounts = [
+                    account_provenance.get(a) or SignalAccount(account_id=a, handle=a)
+                    for a in selection.account_ids
+                ]
+                signals = _build_signals(
+                    selection.posts, signal_accounts, embedder, parameters, common_phrases,
+                    follower_sets=synthetic_follower_sets,
+                )
                 edges, unavailable = fuse_and_prune(
                     signals,
                     theta_edge=parameters.edge_threshold,
@@ -563,6 +668,7 @@ async def run_detection(
                         window_hours=(window_end - window_start).total_seconds() / 3600,
                         now=window_end, embedder=embedder,
                         common_phrase_allowlist=common_phrases,
+                        platform_age_baseline_hours=platform_age_baseline_hours,
                     )
 
                     if not relevance.passed:
@@ -598,6 +704,7 @@ async def run_detection(
                         relevance.overlap_ratio, relevance.anchoring_share,
                         relevance.claim_cluster_post_count, account_id_map, embedder,
                         allowlist_suppressed, comparison_ids, total_posts_by_account, common_phrases,
+                        claim.claim_statement, llm,
                     )
                     recurrence_candidates.append(RecurrenceCandidate(str(network.id), member_set))
 

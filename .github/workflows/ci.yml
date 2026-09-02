@@ -68,8 +68,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Build-only (no push) - validates both Dockerfiles stay deployable ahead of the
+      # Build-only (no push) - validates the image stays deployable ahead of the
       # planned Cloud Run rollout, without needing any registry credentials yet.
+      # The crawler ships inside this same image now (see docs/CRAWLER.md), so
+      # there's no separate Dockerfile.crawler to build here anymore.
       - name: Build service image
         uses: docker/build-push-action@v6
         with:
@@ -78,13 +80,3 @@ jobs:
           tags: cis-ai-service:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Build crawler image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.crawler
-          push: false
-          tags: cis-ai-crawler:ci
-          cache-from: type=gha,scope=crawler
-          cache-to: type=gha,mode=max,scope=crawler

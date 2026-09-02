@@ -72,7 +72,11 @@ already-created `run_id`:
    sent by the backend — PRD 10.5.1's 50%-overlap-between-runs rule is enforced on
    their side). Allowlisted accounts (from the request's `exclusions.accounts`) are
    dropped before graph construction; the remaining set is capped at `candidate_cap`
-   (default 5,000) by post volume.
+   (default 5,000) by post volume. **News-sourced posts (`ContentSource.RSS`) are
+   excluded from the candidate query entirely** (`pipeline._load_candidate_posts`,
+   Data Pipeline & Source Spec v1.0 D6) — legitimate syndication makes outlets
+   publish near-identical text simultaneously by design, which is exactly what
+   `w_time`/`w_text` would otherwise read as coordination.
 2. **Signals** (`signals/`) — five independent pairwise similarity scores per
    account pair, each in `[0,1]`. `w_struct` is always `None` today (no
    follower-graph data source exists yet) — see "Known gaps" below.
@@ -119,6 +123,13 @@ already-created `run_id`:
    `evidence_snapshot` row, or `offtopic_cluster` for relevance-gate failures.
    Failures anywhere in the run are caught and recorded as
    `DetectionRunStatus.FAILED` with `error` set, never silently lost.
+   `coordinated_network.label` is LLM-generated here (`_generate_network_label`,
+   `LLMClient.generate_network_label`) - a short, deliberately neutral, topic-only
+   description of the claim the network is amplifying (PRD 10.9.1's hard rule
+   against asserting automation/bad-faith/identity applies to this text same as
+   everywhere else in F5 - see `NETWORK_LABEL_SYSTEM_PROMPT`). Falls back to a
+   deterministic `"Coordinated activity: {claim_statement}"` when no `llm` is
+   passed or the call fails - never blocks persistence on it.
 
 ## The two endpoints
 
@@ -182,26 +193,52 @@ the shared generator behind two call sites:
 
 - `POST /api/v1/admin/generate-coordinated-network` (optional `claim_id`,
   `topic_hint` query params) — no `verify_backend_api_key`, same as
-  `/admin/generate-generic-claim`. Synthesizes an 8-account, 24-post coordinated
-  burst (near-duplicate text, tightly packed timing) on a claim — a new demo claim
-  if `claim_id` is omitted, else an existing one — then writes the `detection_run`
-  row synchronously (`status=pending`) before returning 202, exactly like
-  `POST /api/v1/detection/runs`, so a caller can poll immediately while detection
-  runs in the background. Also rescores the claim after attaching the burst, so
-  `claim_score_snapshots` gets a fresh point rather than staying static.
+  `/admin/generate-generic-claim`. Synthesizes a mixed-population candidate pool on
+  a claim — a new demo claim if `claim_id` is omitted, else an existing one — then
+  writes the `detection_run` row synchronously (`status=pending`) before returning
+  202, exactly like `POST /api/v1/detection/runs`, so a caller can poll immediately
+  while detection runs in the background. Also rescores the claim after attaching
+  the burst, so `claim_score_snapshots` gets a fresh point rather than staying static.
 - `scripts/seed_demo_data.py` calls the same generator, then awaits
   `pipeline.run_detection()` directly (not backgrounded) so the script finishes with
   a fully completed network.
 
-Deliberately drives only `w_time`/`w_text` — `w_amp`/`w_meta` are currently dead in
-the real pipeline regardless of synthetic input (see "Known gaps" below), so a fake
-account profile wouldn't move them. **The resulting network typically scores Low
-confidence**, not Medium/High — not a bug: `compute_temporal_synchrony`'s null model
-looks for a burst that's surprising *relative to the candidate pool's other
-activity*, and since the whole candidate pool here (burst + the claim's own seed
-posts) is generated within the same few seconds of wall-clock time, there's no quiet
-baseline for it to stand out against. A real run has weeks of organic activity
-providing that contrast. `du` (duplication) and `co` (cohesion) still land high.
+**Mixed population, not 100% coordinated**: `COORD_DEMO_ACCOUNT_COUNT = 40` total,
+`COORD_DEMO_COORDINATED_RATIO = 0.6` (24) actually coordinated - the remaining 16 are
+genuinely independent "organic" accounts posting about the same claim at their own
+scattered times, with none of the coordinated group's shared signature. A network
+that flags 100% of its candidate pool would be an unrealistic demo and wouldn't show
+the detector actually discriminating real coordination from incidental noise, which
+is the entire point of the multi-signal rule and the relevance gate. Verified live:
+the detector correctly finds exactly the 24 coordinated accounts as network members
+(0 organic accounts leaked in), with the 16 organic accounts (plus overflow) landing
+as `comparison`-role rows instead.
+
+**Drives all 5 signals** - a deliberate "perfect condition" simulation for the
+coordinated 60%, not a reflection of what any real platform we've wired up can
+supply today (see `docs/SOURCES.md` and "Known gaps" below, which this does **not**
+change for real content):
+- `w_time`/`w_text`: real signal off genuinely close-together, genuinely similar
+  `ContentItem` rows, contrasted against a spread-out per-account posting baseline
+  (`COORD_DEMO_BASELINE_*`) so the burst has something quiet to stand out against.
+- `w_amp`: every coordinated post carries the same synthetic `ContentItem.outbound_urls`
+  entry - a column only this generator ever populates.
+- `w_meta`: real `Account` rows are pre-created for the coordinated group with
+  synthetic-but-structurally-valid provenance (clustered `created_at_platform`,
+  shared bio/handle-template/profile_hash/location/client_app) *before*
+  `run_detection` executes, read via `pipeline._load_account_provenance` - the real
+  pipeline code is completely unmodified, just fed a complete-signal scenario.
+- `w_struct`: `run_detection`'s `synthetic_follower_sets` param (always `None`/absent
+  for every real, backend-triggered run) gives the coordinated group a shared set of
+  synthetic "hub" accounts they all follow.
+
+Typical result at full population: `signal_breadth` 3/5, `coordination_score` in the
+low-to-mid 50s - close to but not reliably past the Medium cutoff (55), since `sy`
+(synchrony) and `au` (automation/circadian) stay comparatively low even with the
+baseline-contrast fix (see `demo_seed.py`'s module docstring for exactly why, and
+what was tried). Not a bug - a same-night synthetic burst is a fundamentally easier
+case for the null-model/circadian sub-signals to see through than weeks of organic
+activity would be for a real campaign.
 
 ## Data model
 

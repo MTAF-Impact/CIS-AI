@@ -15,12 +15,15 @@ WORKDIR /app
 # builder, which rejects that syntax outright ("the --mount option requires BuildKit").
 # This trades away persistent cross-build uv cache for guaranteed build-pipeline
 # portability; Docker's normal layer cache still applies within a single build.
+# --group crawler: the crawler ships inside this same image/deployment now
+# (POST /admin/run-crawler runs it in-process) rather than as a separate Cloud Run
+# Job - see docs/CRAWLER.md.
 COPY uv.lock pyproject.toml /app/
-RUN uv sync --frozen --no-install-project --no-dev
+RUN uv sync --frozen --no-install-project --no-dev --group crawler
 
 COPY . /app
 
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --group crawler
 
 # ---------- Runtime stage ----------
 FROM python:3.11-slim

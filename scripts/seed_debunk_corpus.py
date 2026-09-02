@@ -17,6 +17,15 @@ guessed at: compute_falseness_score() (app/services/falseness_service.py) treats
 every row here as "similarity to this = high Falseness", so a wrongly-included
 true statement would poison the corpus.
 
+Embeds the ENGLISH TRANSLATION of the claim text, not the raw Indonesian title -
+the embedding model (app/services/embedding_service.py) is English-only, same
+reason every ContentItem stores text_en alongside the original. Found by testing:
+a claim closely paraphrasing a real seeded hoax topic (Pramono Anung / non-DKI
+workers) scored 0.51 similarity against the untranslated Indonesian title - just
+under DEFAULT_MATCH_THRESHOLD (0.55), a real match silently missed. Falls back to
+embedding the raw Indonesian text (degraded, not broken) if the LLM call fails or
+no key is configured - logged, never silent.
+
 Usage:
     uv run python scripts/seed_debunk_corpus.py
 """
@@ -34,6 +43,7 @@ from app.core.database import AsyncSessionLocal
 from app.core.logging_config import configure_logging
 from app.models.official_source import OfficialSource
 from app.services.embedding_service import get_embedding_service
+from app.services.llm_client import get_llm_client
 
 configure_logging(level=settings.LOG_LEVEL, json_format=False)
 logger = logging.getLogger("seed_debunk_corpus")
@@ -84,6 +94,7 @@ async def main() -> None:
         return
 
     embedder = get_embedding_service()
+    llm = get_llm_client()
     async with AsyncSessionLocal() as session:
         existing_urls = set(
             (await session.execute(select(OfficialSource.source_url))).scalars().all()
@@ -92,13 +103,23 @@ async def main() -> None:
         for entry in items:
             if entry["link"] in existing_urls:
                 continue
-            content = entry["description"][:CONTENT_CHAR_LIMIT] or entry["claim_text"]
+            claim_text = entry["claim_text"]
+            try:
+                analysis = await llm.analyze_content(claim_text)
+                embed_text = analysis.text_en or claim_text
+            except Exception:  # noqa: BLE001 - keep seeding usable without a live OpenAI key
+                logger.warning(
+                    "Translation failed for %r - embedding raw Indonesian text instead",
+                    claim_text[:60],
+                )
+                embed_text = claim_text
+            content = entry["description"][:CONTENT_CHAR_LIMIT] or claim_text
             session.add(
                 OfficialSource(
-                    title=entry["claim_text"][:255],
+                    title=claim_text[:255],
                     content=content,
                     source_url=entry["link"] or None,
-                    embedding=embedder.embed(entry["claim_text"]),
+                    embedding=embedder.embed(embed_text),
                 )
             )
             added += 1

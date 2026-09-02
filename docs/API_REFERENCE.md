@@ -540,6 +540,20 @@ point — poll it directly, same as `POST /api/v1/detection/runs` below.
 
 **404:** `claim_id` doesn't resolve to an Existing claim. **503:** no LLM key.
 
+### `POST /admin/run-crawler`
+
+Runs `crawler/main.py` in-process (fetch RSS/YouTube/Telegram → filter → submit) —
+the crawler ships inside this same deployment now rather than as a separate Cloud
+Run Job, see `docs/CRAWLER.md`'s Deployment section. No request body.
+
+**202:** `{"status": "started", "detail": "..."}` immediately — the crawl itself runs
+as a background task; watch Cloud Logging for progress (same log lines as a local
+`--dry-run`), there's no polling endpoint for it.
+
+**503:** `GOOGLE_API_KEY` isn't set. YouTube is a required source, not best-effort —
+this fails fast with a visible HTTP error instead of returning 202 and then dying
+silently in the background.
+
 ---
 
 ## Detection — F5 pipeline trigger + purge
@@ -609,8 +623,9 @@ cluster. See `ARCHITECTURE.md` for the exact weight/threshold constants.
 
 ### `POST /matchmaking/policies`
 
-**The primary integration entry point — see `GO_INTEGRATION.md` for the full 3-flow
-contract, retry/idempotency semantics, and the outbound callback this triggers.** The Go
+**The primary integration entry point — see `GO_INTEGRATION.md` for the full
+backend↔AI contract (8 backend→AI + 2 AI→backend flows as of PRD v1.5),
+retry/idempotency semantics, and the outbound callback this triggers.** The Go
 backend calls this after a policy is uploaded through F2; this service never calls it
 itself.
 
