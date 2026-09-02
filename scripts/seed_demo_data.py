@@ -369,7 +369,9 @@ async def main() -> None:
         _, run, run_kwargs = await demo_seed.generate_demo_coordinated_network(
             session, llm, embedder, topic_hint="ERP congestion pricing backlash"
         )
-        await pipeline.run_detection(run_id=run.id, session_factory=AsyncSessionLocal, **run_kwargs)
+        await pipeline.run_detection(
+            run_id=run.id, session_factory=AsyncSessionLocal, llm=llm, **run_kwargs
+        )
         # populate_existing=True forces a fresh read - run_detection committed this
         # row through a *different* session, so this session's identity map still
         # holds the stale pending-status object from create_pending_run otherwise.

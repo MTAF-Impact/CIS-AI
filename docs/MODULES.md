@@ -33,12 +33,13 @@ Pydantic schema in `app/schemas/analysis.py`):
 | `summarize_claim(sample_texts)` | Synthesize a fresh `claim_statement` + candidate `topic_label` from a cluster of posts. | `clustering_service.build_claim_from_content_items` |
 | `classify_stance(claim_statement, post_text)` | Single-post stance vs. a known claim. | `clustering_service` Pass 1 (attach to existing claim) |
 | `classify_stances_batch(claim_statement, texts)` | Batched stance for a whole new cluster in one call. Raises `StanceCountMismatchError` if the model returns a different count than given — the caller must not silently zip a misaligned result. | `clustering_service` Pass 2 (new claim), falls back to per-item `classify_stance` on failure |
-| `classify_harm(claim_statement, sample_supporting_texts)` | The 4 Harm sub-scores, against the detailed 5-band rubric (see `SCORING.md`). | `clustering_service.build_claim_from_content_items` |
+| `classify_harm(claim_statement, sample_supporting_texts, hazard_context="")` | The 4 Harm sub-scores, against the detailed 5-band rubric (see `SCORING.md`). `hazard_context` is an optional live-grounding block (active BMKG forecasts — `hazard_context_service.fetch_bmkg_context`, see `docs/SOURCES.md`), omitted from the prompt entirely when empty. | `clustering_service.build_claim_from_content_items` |
 | `generate_debunk(claim_statement, grounding_context)` | The Truth Sandwich (`core_fact`/`nuanced_flag`/`reiterated_fact`). | `activity_service.generate_and_cache_debunk_activity` |
 | `generate_debunk_segments(claim_statement, grounding_context, sample_texts)` | PRD v1.5 US12: 1-4 audience segments (`segment_name`/`segment_rationale`/`content`), inferred from a Supporting-side sample, most-exposed first. | `activity_service._generate_debunk_segments` |
 | `predict_non_existing_claim(policy_title, policy_description, grounding_context)` | Predicted claim statement, topic, attack angle, framing, and the Prebunk explainer. | `claim_prediction_service.predict_non_existing_claim` |
 | `generate_synthetic_posts(count, topic_hint, grounding_context)` | Fabricates realistic Jakarta posts (prototype crawler stand-in). | `ingestion.py`'s `/ingest/generate-synthetic`, `admin_service.generate_demo_existing_claim` |
 | `confirm_policy_claim_matches(policy_title, policy_description, candidate_claim_statements)` | One boolean per candidate claim — is it genuinely about this policy? Raises `ValueError` on a count mismatch. | `policy_matchmaking_service._run` |
+| `generate_network_label(claim_statement, sample_texts)` | Short (3-8 word) neutral label for a detected coordinated network (`coordinated_network.label`) — naming WHAT topic the activity centers on, never WHO/WHY (PRD 10.9.1 hard rule against asserting automation/bad-faith/identity). | `app/services/coordination/pipeline.py::_persist_network`, via `_generate_network_label`'s deterministic-fallback wrapper |
 
 `get_llm_client()` — `@lru_cache`-singleton factory, the `Depends()` target everywhere.
 
@@ -172,10 +173,39 @@ themselves and the exact constants (`WEIGHT_R`, `GAMMA`, `RELIABILITY_THRESHOLD`
 
 ## `app/services/falseness_service.py`
 
-`compute_falseness_score(db, claim_embedding, threshold=0.55) -> float | None` — top-1
-pgvector cosine-similarity match against `official_sources`. Deliberately a **separate
-module** from `rag_service.py`: RAG grounding (below) is soft/best-effort context for LLM
-prompts; this is hard-thresholded and must never fabricate a value.
+`compute_falseness_score(db, claim_embedding, claim_statement=None, threshold=0.55) ->
+float | None` — two paths, tried in order, never fabricated:
+1. Top-1 pgvector cosine-similarity match against `official_sources` (seeded by
+   `scripts/seed_debunk_corpus.py` — see `docs/SOURCES.md`).
+2. If that misses and `claim_statement` is given, a live `fact_check_client` lookup —
+   any matching Google Fact Check Tools API result with a false-reading
+   `textualRating` scores a fixed `LIVE_FACT_CHECK_MATCH_SCORE` (75.0), since it's a
+   real verified verdict, not a modelled similarity.
+
+Deliberately a **separate module** from `rag_service.py`: RAG grounding (below) is
+soft/best-effort context for LLM prompts; this is hard-thresholded and must never
+fabricate a value.
+
+---
+
+## `app/services/fact_check_client.py`
+
+`search_fact_checks(query, language_code="id")` / `has_false_rating(claims)` — thin
+async wrapper around the Google Fact Check Tools API (`claims:search`). Free, optional:
+returns `[]`/`False` whenever `settings.GOOGLE_API_KEY` is unset or the request fails
+for any reason — a live external dependency must degrade, never raise, into the scoring
+path. Used only by `falseness_service`'s second F path. See `docs/SOURCES.md`.
+
+---
+
+## `app/services/hazard_context_service.py`
+
+`fetch_bmkg_context() -> str` — polls BMKG's public weather-forecast API for each
+`BMKG_ADM4_CODES` location, returns a plain-text block flagging any hazard-adjacent
+forecast (rain/storm/high wind) in the next ~24h, or a "no significant hazard" line.
+Free, no auth, silently returns `""` on any failure. Feeds `LLMClient.classify_harm`'s
+`hazard_context` param — see `docs/SOURCES.md` for what's covered (BMKG only for
+now; PetaBencana/FIRMS are deferred) and why.
 
 ---
 

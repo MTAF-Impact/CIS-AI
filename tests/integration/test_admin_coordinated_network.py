@@ -9,6 +9,7 @@ from sqlalchemy import select
 from app.models.alert import ClaimScoreSnapshot
 from app.models.coordination import CoordinatedNetwork, DetectionRun
 from app.models.enums import DetectionRunStatus
+from app.services.coordination import demo_seed
 
 pytestmark = pytest.mark.integration
 
@@ -29,7 +30,13 @@ class TestGenerateCoordinatedNetwork:
             await db_session.execute(select(CoordinatedNetwork).where(CoordinatedNetwork.run_id == run_id))
         ).scalars().all()
         assert len(networks) == 1
-        assert networks[0].account_count == 8
+        # Only the coordinated fraction of the generated pool should ever surface as
+        # a network - see demo_seed's module docstring for why 100% coordinated
+        # would be an unrealistic (and less convincing) demo.
+        expected_coordinated_count = round(
+            demo_seed.COORD_DEMO_ACCOUNT_COUNT * demo_seed.COORD_DEMO_COORDINATED_RATIO
+        )
+        assert networks[0].account_count == expected_coordinated_count
         assert networks[0].signal_breadth >= 2  # multi-signal rule
 
     async def test_appends_a_fresh_score_snapshot_not_a_single_point(self, client, db_session):

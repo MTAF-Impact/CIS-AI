@@ -55,6 +55,8 @@ in its log), and if it didn't, kill and restart the process manually.
 | `BACKEND_URL` | `""` | Go backend base URL, for the Flow 2 callback. See `GO_INTEGRATION.md`. |
 | `AI_SERVICE_API_KEY` | `""` | Inbound auth for the 2 Go-facing endpoints, optional. |
 | `INTERNAL_API_KEY` | `""` | Outbound `X-Internal-Key` on the Flow 2 callback, optional. |
+| `GOOGLE_API_KEY` | `""` | Google Fact Check Tools API (Falseness fallback) - free, optional here, silently skipped when unset. **Required on the crawler side** (`crawler/config.py` - same env var, shared key, one Google Cloud project with both APIs enabled) - the crawler refuses to run without it, since YouTube is a required source there, not optional. See `docs/SOURCES.md`. |
+| `BMKG_ADM4_CODES` | `["31.71.03.1001"]` | Kelurahan-level codes polled for live weather-hazard grounding (Harm classification). Only Kemayoran is verified so far - extend against Kepmendagri 100.1.1-6117/2022, don't guess codes. |
 
 ## Seed demo data
 

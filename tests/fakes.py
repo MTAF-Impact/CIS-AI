@@ -87,15 +87,23 @@ class FakeLLMClient:
         return [await self.classify_stance(claim_statement, text) for text in texts]
 
     async def classify_harm(
-        self, claim_statement: str, sample_supporting_texts: list[str]
+        self, claim_statement: str, sample_supporting_texts: list[str], hazard_context: str = ""
     ) -> HarmClassificationSchema:
-        self.calls.append(("classify_harm", (claim_statement, sample_supporting_texts), {}))
+        self.calls.append(
+            ("classify_harm", (claim_statement, sample_supporting_texts, hazard_context), {})
+        )
         return HarmClassificationSchema(
             public_safety=40.0,
             institutional_trust=50.0,
             economic=30.0,
             policy_disruption=20.0,
         )
+
+    async def generate_network_label(
+        self, claim_statement: str, sample_texts: list[str]
+    ) -> str:
+        self.calls.append(("generate_network_label", (claim_statement, sample_texts), {}))
+        return f"Fake network label: {claim_statement[:40]}"
 
     async def generate_debunk(
         self, claim_statement: str, grounding_context: str
@@ -189,8 +197,13 @@ class AlwaysFailingLLMClient:
         raise self._error()
 
     async def classify_harm(
-        self, claim_statement: str, sample_supporting_texts: list[str]
+        self, claim_statement: str, sample_supporting_texts: list[str], hazard_context: str = ""
     ) -> HarmClassificationSchema:
+        raise self._error()
+
+    async def generate_network_label(
+        self, claim_statement: str, sample_texts: list[str]
+    ) -> str:
         raise self._error()
 
     async def generate_debunk(

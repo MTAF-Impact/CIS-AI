@@ -18,7 +18,7 @@ from app.models.content import ContentItem
 from app.models.enums import ClaimStatus, ClaimType, Stance
 from app.models.topic import Topic
 from app.models.topic_volume_bucket import TopicVolumeBucket
-from app.services import falseness_service, scoring_engine
+from app.services import falseness_service, hazard_context_service, scoring_engine
 from app.services.activity_service import generate_and_cache_debunk_activity
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.llm_client import LLMClient, get_llm_client
@@ -270,7 +270,9 @@ async def rescore_claim(db: AsyncSession, claim: Claim) -> None:
     velocity = scoring_engine.velocity_zscore(raw_v, baseline_mean, baseline_std)
 
     falseness = (
-        await falseness_service.compute_falseness_score(db, claim.embedding)
+        await falseness_service.compute_falseness_score(
+            db, claim.embedding, claim.claim_statement
+        )
         if claim.embedding is not None
         else None
     )
@@ -369,8 +371,9 @@ async def build_claim_from_content_items(
         for item, stance in zip(cluster_items, stances, strict=True)
         if stance == Stance.SUPPORTING
     ] or sample_texts
+    hazard_context = await hazard_context_service.fetch_bmkg_context()
     try:
-        harm = await llm.classify_harm(claim_statement, supporting_texts[:10])
+        harm = await llm.classify_harm(claim_statement, supporting_texts[:10], hazard_context)
     except Exception:
         logger.exception("Harm classification failed; leaving harm fields unset")
     else:
