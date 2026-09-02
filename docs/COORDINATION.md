@@ -173,6 +173,36 @@ snapshot (`cis_network_reports`), which is what makes the "except reported"
 exception possible — and hands over the list. This service just executes the
 deletion, since the rows are AI-owned (`governance.purge_expired_evidence`).
 
+## Demo/testing tooling
+
+Not part of the backend's real contract above — for producing a populated
+`coordinated_network` row without needing a real coordinated campaign to observe.
+`app/services/coordination/demo_seed.py`'s `generate_demo_coordinated_network()` is
+the shared generator behind two call sites:
+
+- `POST /api/v1/admin/generate-coordinated-network` (optional `claim_id`,
+  `topic_hint` query params) — no `verify_backend_api_key`, same as
+  `/admin/generate-generic-claim`. Synthesizes an 8-account, 24-post coordinated
+  burst (near-duplicate text, tightly packed timing) on a claim — a new demo claim
+  if `claim_id` is omitted, else an existing one — then writes the `detection_run`
+  row synchronously (`status=pending`) before returning 202, exactly like
+  `POST /api/v1/detection/runs`, so a caller can poll immediately while detection
+  runs in the background. Also rescores the claim after attaching the burst, so
+  `claim_score_snapshots` gets a fresh point rather than staying static.
+- `scripts/seed_demo_data.py` calls the same generator, then awaits
+  `pipeline.run_detection()` directly (not backgrounded) so the script finishes with
+  a fully completed network.
+
+Deliberately drives only `w_time`/`w_text` — `w_amp`/`w_meta` are currently dead in
+the real pipeline regardless of synthetic input (see "Known gaps" below), so a fake
+account profile wouldn't move them. **The resulting network typically scores Low
+confidence**, not Medium/High — not a bug: `compute_temporal_synchrony`'s null model
+looks for a burst that's surprising *relative to the candidate pool's other
+activity*, and since the whole candidate pool here (burst + the claim's own seed
+posts) is generated within the same few seconds of wall-clock time, there's no quiet
+baseline for it to stand out against. A real run has weeks of organic activity
+providing that contrast. `du` (duplication) and `co` (cohesion) still land high.
+
 ## Data model
 
 10 tables in `app/models/coordination.py`, names/columns matching
