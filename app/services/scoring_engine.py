@@ -6,23 +6,46 @@ import uuid
 from dataclasses import dataclass
 
 TOTAL_MONITORED_PLATFORMS = 5  # len(app.models.enums.ContentSource)
-ROLLING_WINDOW_HOURS = 24.0  # reused for both Velocity's delta window and NPR's window
 RELIABILITY_THRESHOLD = 25  # posts; midpoint of the PRD's recommended 20-30 range
 GAMMA = 0.5  # NPR discount cap - even NPR=1 reduces the score by at most 50%
 TOPIC_ATTACH_THRESHOLD = 0.5  # cosine similarity for dynamic topic assignment
+DEFAULT_VELOCITY_EPSILON = 1.0  # deliberate low-volume damping, not a bare div-by-zero guard
+DEFAULT_VELOCITY_ZSCORE_MIN = -3.0
+DEFAULT_VELOCITY_ZSCORE_MAX = 3.0
 
-# ClaimScore = 0.15*R + 0.15*V + 0.30*F + 0.30*H + 0.10*EI
-WEIGHT_R = 0.15
-WEIGHT_V = 0.15
-WEIGHT_F = 0.30
-WEIGHT_H = 0.30
-WEIGHT_EI = 0.10
+# Every weight/threshold constant below is a fallback default now - the real values
+# are read from the backend-owned `cis_settings` table at runtime (see
+# app/services/config_service.py, documentation/CIS/AI_DYNAMIC_PARAMETER.md). Kept
+# here, not just in config_service, so every function in this file stays a pure,
+# independently-testable unit with a sane default when called directly (as the unit
+# tests and demo/admin call sites do).
 
-# PolicyDisruption weighted lowest - avoid scoring policy criticism itself as harm.
-HARM_WEIGHT_PUBLIC_SAFETY = 0.35
-HARM_WEIGHT_INSTITUTIONAL_TRUST = 0.30
-HARM_WEIGHT_ECONOMIC = 0.20
-HARM_WEIGHT_POLICY_DISRUPTION = 0.15
+
+@dataclass(frozen=True)
+class ScoreWeights:
+    """ClaimScore = reach*R + velocity*V + falseness*F + harm*H + emotional_intensity*EI."""
+
+    reach: float = 0.15
+    velocity: float = 0.15
+    falseness: float = 0.30
+    harm: float = 0.30
+    emotional_intensity: float = 0.10
+
+
+DEFAULT_SCORE_WEIGHTS = ScoreWeights()
+
+
+@dataclass(frozen=True)
+class HarmWeights:
+    """PolicyDisruption weighted lowest - avoid scoring policy criticism itself as harm."""
+
+    public_safety: float = 0.35
+    institutional_trust: float = 0.30
+    economic: float = 0.20
+    policy_disruption: float = 0.15
+
+
+DEFAULT_HARM_WEIGHTS = HarmWeights()
 
 
 @dataclass(frozen=True)
@@ -65,39 +88,45 @@ def normalize_minmax_per_topic(raw_values: dict[uuid.UUID, float]) -> dict[uuid.
     return {k: round((v - lo) / (hi - lo) * 100, 4) for k, v in raw_values.items()}
 
 
-def raw_velocity(volume_t: int, volume_t_minus_delta: int, epsilon: float = 1.0) -> float:
+def raw_velocity(
+    volume_t: int, volume_t_minus_delta: int, epsilon: float = DEFAULT_VELOCITY_EPSILON
+) -> float:
     """V_raw = (Volume_t - Volume_t-delta) / (Volume_t-delta + epsilon)."""
     return (volume_t - volume_t_minus_delta) / (volume_t_minus_delta + epsilon)
 
 
-def _stable_sigmoid(z: float) -> float:
-    """Numerically stable logistic sigmoid - avoids overflow for large |z|."""
-    if z >= 0:
-        return 1.0 / (1.0 + math.exp(-z))
-    exp_z = math.exp(z)
-    return exp_z / (1.0 + exp_z)
-
-
 def velocity_zscore(
-    raw_v: float, topic_baseline_mean: float, topic_baseline_std: float
+    raw_v: float,
+    topic_baseline_mean: float,
+    topic_baseline_std: float,
+    z_min: float = DEFAULT_VELOCITY_ZSCORE_MIN,
+    z_max: float = DEFAULT_VELOCITY_ZSCORE_MAX,
 ) -> float:
-    """Z-score against the topic's baseline, squashed to [0, 100] (z=0 -> 50)."""
+    """Z-score against the topic's baseline, min-max mapped onto [0, 100] against
+    [z_min, z_max] and clamped at the extremes (PRD Sec 6.2.2) - z=0 -> 50 only when
+    the configured range is symmetric around zero, which is the documented default."""
     if topic_baseline_std < 1e-9:
         z = 0.0  # no variance in baseline - can't compute a meaningful z-score
     else:
         z = (raw_v - topic_baseline_mean) / topic_baseline_std
-    return round(100.0 * _stable_sigmoid(z), 4)
+    z = min(max(z, z_min), z_max)
+    return round((z - z_min) / (z_max - z_min) * 100, 4)
 
 
 def harm_score(
-    public_safety: float, institutional_trust: float, economic: float, policy_disruption: float
+    public_safety: float,
+    institutional_trust: float,
+    economic: float,
+    policy_disruption: float,
+    weights: HarmWeights = DEFAULT_HARM_WEIGHTS,
 ) -> float:
-    """H = 0.35*PublicSafety + 0.30*InstitutionalTrust + 0.20*Economic + 0.15*PolicyDisruption."""
+    """H = weights.public_safety*PublicSafety + weights.institutional_trust*InstitutionalTrust
+    + weights.economic*Economic + weights.policy_disruption*PolicyDisruption."""
     score = (
-        HARM_WEIGHT_PUBLIC_SAFETY * public_safety
-        + HARM_WEIGHT_INSTITUTIONAL_TRUST * institutional_trust
-        + HARM_WEIGHT_ECONOMIC * economic
-        + HARM_WEIGHT_POLICY_DISRUPTION * policy_disruption
+        weights.public_safety * public_safety
+        + weights.institutional_trust * institutional_trust
+        + weights.economic * economic
+        + weights.policy_disruption * policy_disruption
     )
     return round(min(max(score, 0.0), 100.0), 4)
 
@@ -108,14 +137,25 @@ def emotional_intensity(outrage_word_density_avg: float, negative_reaction_ratio
     return round(min(max(score, 0.0), 100.0), 4)
 
 
-def claim_score(r: float, v: float, f: float | None, h: float, ei: float) -> float:
-    """ClaimScore = 0.15R + 0.15V + 0.30F + 0.30H + 0.10EI. Missing F renormalizes the
-    rest instead of scoring as 0."""
+def claim_score(
+    r: float, v: float, f: float | None, h: float, ei: float, weights: ScoreWeights = DEFAULT_SCORE_WEIGHTS
+) -> float:
+    """ClaimScore = weights.reach*R + weights.velocity*V + weights.falseness*F +
+    weights.harm*H + weights.emotional_intensity*EI. Missing F renormalizes the rest
+    over (1 - weights.falseness) instead of scoring as 0."""
     if f is None:
-        remaining_weight = WEIGHT_R + WEIGHT_V + WEIGHT_H + WEIGHT_EI
-        score = (WEIGHT_R * r + WEIGHT_V * v + WEIGHT_H * h + WEIGHT_EI * ei) / remaining_weight
+        remaining_weight = weights.reach + weights.velocity + weights.harm + weights.emotional_intensity
+        score = (
+            weights.reach * r + weights.velocity * v + weights.harm * h + weights.emotional_intensity * ei
+        ) / remaining_weight
     else:
-        score = WEIGHT_R * r + WEIGHT_V * v + WEIGHT_F * f + WEIGHT_H * h + WEIGHT_EI * ei
+        score = (
+            weights.reach * r
+            + weights.velocity * v
+            + weights.falseness * f
+            + weights.harm * h
+            + weights.emotional_intensity * ei
+        )
     return round(min(max(score, 0.0), 100.0), 4)
 
 
@@ -127,11 +167,16 @@ def compute_npr(supporting_volume: int, opposing_volume: int) -> tuple[float | N
     return round(opposing_volume / total, 4), False
 
 
-def discount_factor(npr: float | None, total_volume: int) -> float:
+def discount_factor(
+    npr: float | None,
+    total_volume: int,
+    gamma: float = GAMMA,
+    reliability_threshold: int = RELIABILITY_THRESHOLD,
+) -> float:
     """DiscountFactor = 1 - (gamma * NPR); defaults to 1 when dormant or below threshold."""
-    if npr is None or total_volume < RELIABILITY_THRESHOLD:
+    if npr is None or total_volume < reliability_threshold:
         return 1.0
-    return round(1.0 - GAMMA * npr, 4)
+    return round(1.0 - gamma * npr, 4)
 
 
 def final_claim_score(claim_score_value: float, discount: float) -> float:

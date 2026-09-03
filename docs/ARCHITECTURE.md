@@ -85,6 +85,18 @@ neither `LLMClient` nor `EmbeddingService` holds request-scoped state. See
 `tests/conftest.py`'s module docstring: integration tests must **never** call a real LLM;
 this pattern is what makes that guarantee hold for background work too.
 
+**`RuntimeConfig` (dynamic scoring parameters) follows `embedder`'s rule, not `llm`'s.**
+Unlike `llm`, there's no `dependency_overrides`-bypass risk to guard against here —
+`config_service.get_config(db)` is a plain function, not gated behind a FastAPI
+`Depends()` anywhere tests need to intercept it, and it degrades to a deterministic
+built-in default whenever `cis_settings` is missing/unreachable (see
+`config_service.py`'s module docstring). So clustering/matchmaking functions that take
+`config: RuntimeConfig | None = None` auto-resolve it via the `db` session they already
+have (`config = config or await config_service.get_config(db)`) instead of requiring
+every caller to thread it explicitly — the same pattern as `embedder`. Callers that
+already hold a snapshot (e.g. `cluster_unclustered_content` looping over Pass 1/Pass 2)
+still pass it down explicitly, so one pass never reads two different settings mid-run.
+
 Background-task-scheduling endpoints today: `POST /ingest`, `POST /ingest/batch`
 (clustering), `POST /policies` (matchmaking), `POST /matchmaking/policies` (matchmaking,
 Go-triggered), `POST /api/v1/detection/runs` and `POST /admin/generate-coordinated-network`

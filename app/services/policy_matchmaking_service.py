@@ -16,7 +16,7 @@ from app.core.database import get_session_factory
 from app.models.claim import Claim
 from app.models.enums import ClaimType
 from app.models.policy import ClaimPolicy, Policy
-from app.services import backend_callback_service
+from app.services import backend_callback_service, config_service
 from app.services.claim_prediction_service import predict_non_existing_claim
 from app.services.document_extraction import extract_text
 from app.services.embedding_service import EmbeddingService, get_embedding_service
@@ -25,15 +25,13 @@ from app.services.llm_client import LLMClient, get_llm_client
 logger = logging.getLogger(__name__)
 
 DOCUMENT_FETCH_TIMEOUT_SECONDS = 30.0
-
-# Cosine prefilter before the LLM confirmation call, to bound candidate count.
-CLAIM_MATCH_PREFILTER_THRESHOLD = 0.35
 MAX_MATCH_CANDIDATES = 20
 POLICY_TEXT_EXCERPT_CHARS = 4000
 
 
 async def _run(db, policy: Policy, llm: LLMClient, embedder: EmbeddingService) -> tuple[int, int]:
     """Returns (matched_claim_count, generated_claim_count) for the Flow 2 callback."""
+    config = await config_service.get_config(db)
     policy_text = (
         f"{policy.title}\n{policy.description or ''}\n"
         f"{(policy.extracted_text or '')[:POLICY_TEXT_EXCERPT_CHARS]}"
@@ -63,7 +61,9 @@ async def _run(db, policy: Policy, llm: LLMClient, embedder: EmbeddingService) -
         reverse=True,
     )
     candidates = [
-        claim for score, claim in scored[:MAX_MATCH_CANDIDATES] if score >= CLAIM_MATCH_PREFILTER_THRESHOLD
+        claim
+        for score, claim in scored[:MAX_MATCH_CANDIDATES]
+        if score >= config.claim_prefilter_threshold
     ]
 
     matched_claims: list[Claim] = []

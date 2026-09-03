@@ -18,8 +18,14 @@ from app.models.content import ContentItem
 from app.models.enums import ClaimStatus, ClaimType, Stance
 from app.models.topic import Topic
 from app.models.topic_volume_bucket import TopicVolumeBucket
-from app.services import falseness_service, hazard_context_service, scoring_engine
+from app.services import (
+    config_service,
+    falseness_service,
+    hazard_context_service,
+    scoring_engine,
+)
 from app.services.activity_service import generate_and_cache_debunk_activity
+from app.services.config_service import RuntimeConfig
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.llm_client import LLMClient, get_llm_client
 
@@ -27,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 MIN_CLUSTER_SIZE = 2
 MAX_SAMPLE_TEXTS_FOR_SUMMARY = 10
-CLAIM_ATTACH_THRESHOLD = 0.55
 
 
 @dataclass
@@ -45,14 +50,17 @@ def _centroid(vectors: list[list[float]]) -> np.ndarray:
 
 
 async def assign_or_create_topic(
-    db: AsyncSession, claim_embedding: list[float], candidate_label: str
+    db: AsyncSession,
+    claim_embedding: list[float],
+    candidate_label: str,
+    topic_attach_threshold: float = scoring_engine.TOPIC_ATTACH_THRESHOLD,
 ) -> Topic:
     """Attach to the nearest topic by centroid similarity, or create a new one.
 
     An exact (case-insensitive) name match always wins over the embedding threshold:
     the LLM is now shown existing topic names and asked to reuse one verbatim when it
     fits, so if it did reuse a name, that is a stronger signal than a centroid score
-    that happened to fall just under TOPIC_ATTACH_THRESHOLD - without this, two claims
+    that happened to fall just under topic_attach_threshold - without this, two claims
     the LLM itself labeled identically could still end up as two different topic rows
     with the same name."""
     existing_topics = list(
@@ -86,7 +94,7 @@ async def assign_or_create_topic(
         if score > best_score:
             best_topic, best_score = topic, score
 
-    if best_topic is not None and best_score >= scoring_engine.TOPIC_ATTACH_THRESHOLD:
+    if best_topic is not None and best_score >= topic_attach_threshold:
         sibling_embeddings = list(
             (
                 await db.execute(
@@ -133,7 +141,9 @@ async def _reach_inputs(db: AsyncSession, claim_id: uuid.UUID) -> tuple[int, int
     return impressions, unique_authors, content_count, distinct_platforms
 
 
-async def renormalize_topic_reach(db: AsyncSession, topic_id: uuid.UUID) -> list[Claim]:
+async def renormalize_topic_reach(
+    db: AsyncSession, topic_id: uuid.UUID, config: RuntimeConfig | None = None
+) -> list[Claim]:
     """Min-max normalize Reach across every claim in a topic; returns the touched claims."""
     claims = list(
         (
@@ -147,13 +157,14 @@ async def renormalize_topic_reach(db: AsyncSession, topic_id: uuid.UUID) -> list
     if not claims:
         return []
 
+    config = config or await config_service.get_config(db)
     raw_values = {}
     for claim in claims:
         impressions, unique_authors, content_count, distinct_platforms = await _reach_inputs(
             db, claim.id
         )
         raw_values[claim.id] = scoring_engine.raw_reach(
-            impressions, unique_authors, content_count, distinct_platforms
+            impressions, unique_authors, content_count, distinct_platforms, weights=config.reach_weights
         )
 
     normalized = scoring_engine.normalize_minmax_per_topic(raw_values)
@@ -256,22 +267,37 @@ async def _emotional_intensity_inputs(
     return avg_outrage, negative_ratio
 
 
-async def rescore_claim(db: AsyncSession, claim: Claim) -> None:
+async def rescore_claim(db: AsyncSession, claim: Claim, config: RuntimeConfig | None = None) -> None:
     """Recomputes V/F/EI/NPR/discount/final. Reach and Harm are handled elsewhere."""
-    supporting_vol, opposing_vol = await _npr_volumes(db, claim.id, scoring_engine.ROLLING_WINDOW_HOURS)
-    npr, is_dormant = scoring_engine.compute_npr(supporting_vol, opposing_vol)
-    discount = scoring_engine.discount_factor(npr, supporting_vol + opposing_vol)
+    config = config or await config_service.get_config(db)
 
-    volume_t, volume_prev = await _claim_volume_windows(
-        db, claim.id, scoring_engine.ROLLING_WINDOW_HOURS
+    supporting_vol, opposing_vol = await _npr_volumes(db, claim.id, config.npr_window_hours)
+    npr, is_dormant = scoring_engine.compute_npr(supporting_vol, opposing_vol)
+    discount = scoring_engine.discount_factor(
+        npr,
+        supporting_vol + opposing_vol,
+        gamma=config.discount_gamma,
+        reliability_threshold=config.npr_reliability_minimum_posts,
     )
-    raw_v = scoring_engine.raw_velocity(volume_t, volume_prev)
+
+    volume_t, volume_prev = await _claim_volume_windows(db, claim.id, config.velocity_interval_hours)
+    raw_v = scoring_engine.raw_velocity(volume_t, volume_prev, epsilon=config.velocity_epsilon)
     baseline_mean, baseline_std = await _topic_velocity_baseline(db, claim.topic_id)
-    velocity = scoring_engine.velocity_zscore(raw_v, baseline_mean, baseline_std)
+    velocity = scoring_engine.velocity_zscore(
+        raw_v,
+        baseline_mean,
+        baseline_std,
+        z_min=config.velocity_zscore_min,
+        z_max=config.velocity_zscore_max,
+    )
 
     falseness = (
         await falseness_service.compute_falseness_score(
-            db, claim.embedding, claim.claim_statement
+            db,
+            claim.embedding,
+            claim.claim_statement,
+            threshold=config.falseness_match_threshold,
+            live_match_score=config.falseness_live_match_score,
         )
         if claim.embedding is not None
         else None
@@ -287,7 +313,9 @@ async def rescore_claim(db: AsyncSession, claim: Claim) -> None:
     )
 
     harm = claim.harm_score if claim.harm_score is not None else 0.0
-    score = scoring_engine.claim_score(claim.reach_score or 0.0, velocity, falseness, harm, ei)
+    score = scoring_engine.claim_score(
+        claim.reach_score or 0.0, velocity, falseness, harm, ei, weights=config.score_weights
+    )
     final = scoring_engine.final_claim_score(score, discount)
 
     claim.velocity_score = velocity
@@ -303,14 +331,15 @@ async def rescore_claim(db: AsyncSession, claim: Claim) -> None:
     db.add(ClaimScoreSnapshot(claim_id=claim.id, final_claim_score=final))
 
 
-async def rescore_all_existing_claims(db: AsyncSession) -> int:
+async def rescore_all_existing_claims(db: AsyncSession, config: RuntimeConfig | None = None) -> int:
     """Standalone rescore of every existing claim, independent of clustering."""
+    config = config or await config_service.get_config(db)
     topics = list((await db.execute(select(Topic.id))).scalars().all())
     rescored = 0
     for topic_id in topics:
-        claims = await renormalize_topic_reach(db, topic_id)
+        claims = await renormalize_topic_reach(db, topic_id, config)
         for claim in claims:
-            await rescore_claim(db, claim)
+            await rescore_claim(db, claim, config)
             rescored += 1
     await db.commit()
     return rescored
@@ -321,9 +350,11 @@ async def build_claim_from_content_items(
     cluster_items: list[ContentItem],
     llm: LLMClient,
     embedder: EmbeddingService,
+    config: RuntimeConfig | None = None,
 ) -> Claim:
     """Build one new existing claim from a cluster of content items. Shared by Pass 2
     below and admin_service's demo-claim generator."""
+    config = config or await config_service.get_config(db)
     sample_texts = [item.text for item in cluster_items[:MAX_SAMPLE_TEXTS_FOR_SUMMARY]]
     existing_topic_names = list(
         (await db.execute(select(Topic.name))).scalars().all()
@@ -337,7 +368,9 @@ async def build_claim_from_content_items(
         topic_label = "General"
 
     claim_embedding = embedder.embed(claim_statement)
-    topic = await assign_or_create_topic(db, claim_embedding, topic_label)
+    topic = await assign_or_create_topic(
+        db, claim_embedding, topic_label, topic_attach_threshold=config.topic_attach_threshold
+    )
 
     claim = Claim(
         claim_type=ClaimType.EXISTING,
@@ -386,6 +419,7 @@ async def build_claim_from_content_items(
             harm.institutional_trust,
             harm.economic,
             harm.policy_disruption,
+            weights=config.harm_weights,
         )
 
     await generate_and_cache_debunk_activity(db, claim, llm, embedder, supporting_texts)
@@ -396,12 +430,14 @@ async def cluster_unclustered_content(
     db: AsyncSession,
     llm: LLMClient | None = None,
     embedder: EmbeddingService | None = None,
+    config: RuntimeConfig | None = None,
 ) -> ClusterResult:
     """Cluster all not-yet-clustered ContentItems into Claims: attach to an existing
     claim where close enough, HDBSCAN the rest into new claims, then rescore every
     touched topic."""
     llm = llm or get_llm_client()
     embedder = embedder or get_embedding_service()
+    config = config or await config_service.get_config(db)
 
     unclustered_items = list(
         (
@@ -444,7 +480,7 @@ async def cluster_unclustered_content(
                 best_id, best_score = claim_id, score
 
         attached = False
-        if best_id is not None and best_score >= CLAIM_ATTACH_THRESHOLD:
+        if best_id is not None and best_score >= config.claim_attach_threshold:
             claim = claims_by_id[best_id]
             try:
                 stance = await llm.classify_stance(claim.claim_statement, item.text)
@@ -479,7 +515,7 @@ async def cluster_unclustered_content(
             if len(cluster_items) < MIN_CLUSTER_SIZE:
                 continue
 
-            claim = await build_claim_from_content_items(db, cluster_items, llm, embedder)
+            claim = await build_claim_from_content_items(db, cluster_items, llm, embedder, config)
             touched_topic_ids.add(claim.topic_id)
             claims_created += 1
 
@@ -490,11 +526,11 @@ async def cluster_unclustered_content(
     # --- Renormalize Reach per touched topic, then rescore every claim in it ---
     claims_to_rescore: dict[uuid.UUID, Claim] = {}
     for topic_id in touched_topic_ids:
-        for claim in await renormalize_topic_reach(db, topic_id):
+        for claim in await renormalize_topic_reach(db, topic_id, config):
             claims_to_rescore[claim.id] = claim
 
     for claim in claims_to_rescore.values():
-        await rescore_claim(db, claim)
+        await rescore_claim(db, claim, config)
 
     await db.commit()
 
@@ -510,12 +546,13 @@ async def cluster_unclustered_content_task(
     llm: LLMClient | None = None,
     embedder: EmbeddingService | None = None,
     session_factory: async_sessionmaker | None = None,
+    config: RuntimeConfig | None = None,
 ) -> None:
     """BackgroundTasks wrapper - opens its own session since the request is already done."""
     session_factory = session_factory or get_session_factory()
     async with session_factory() as db:
         try:
-            result = await cluster_unclustered_content(db, llm=llm, embedder=embedder)
+            result = await cluster_unclustered_content(db, llm=llm, embedder=embedder, config=config)
             logger.info(
                 "Background clustering complete: %d claims created, %d updated, "
                 "%d items clustered",

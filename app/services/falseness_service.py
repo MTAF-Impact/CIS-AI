@@ -26,6 +26,7 @@ async def compute_falseness_score(
     claim_embedding: list[float],
     claim_statement: str | None = None,
     threshold: float = DEFAULT_MATCH_THRESHOLD,
+    live_match_score: float = LIVE_FACT_CHECK_MATCH_SCORE,
 ) -> float | None:
     """F = top cosine-similarity match against OfficialSource * 100, or (when that
     misses and claim_statement is given) a live Google Fact Check API match. None if
@@ -48,6 +49,6 @@ async def compute_falseness_score(
     if claim_statement:
         claims = await fact_check_client.search_fact_checks(claim_statement)
         if fact_check_client.has_false_rating(claims):
-            return LIVE_FACT_CHECK_MATCH_SCORE
+            return live_match_score
 
     return None
