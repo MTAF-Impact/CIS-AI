@@ -1,11 +1,7 @@
-"""F5 (PRD Section 10) - Coordinated-Network Detector API surface.
-
-Two endpoints, matching the backend's actual reference contract verbatim
-(CIS-Backend internal/aiclient/endpoints.go pathDetectionRun/pathDetectionPurge,
-pulled and reviewed this session) - not the earlier guessed single-endpoint design.
-Everything else (network list/detail, review, account annex, allowlist, CSV export,
-PDF/ZIP reports, F4 config) lives on the backend, which reads the AI's tables
-directly. See docs/COORDINATION.md.
+"""Coordinated-Network Detector API surface. Two endpoints, matching the backend's
+reference contract. Everything else (network list/detail, review, account annex,
+allowlist, CSV export, PDF/ZIP reports, F4 config) lives on the backend, which
+reads the AI's tables directly.
 """
 
 from fastapi import APIRouter, BackgroundTasks, Depends
@@ -39,25 +35,16 @@ async def trigger_detection_run(
     session_factory: async_sessionmaker = Depends(get_session_factory),
     llm: LLMClient = Depends(get_llm_client),
 ) -> DetectionRunResponse:
-    """PRD 10.5.8 - all three trigger modes (scheduled/velocity/on-demand) are the
-    backend's decision now; this just runs the pipeline when asked. The
-    detection_run row is created synchronously (status=pending) before the 202
-    response, so run_id is real and immediately queryable - the backend never
-    polls, it reads the row directly as the pipeline updates it in the
-    background.
+    """The detection_run row is created synchronously (status=pending) before the
+    202 response, so run_id is real and immediately queryable - the backend never
+    polls, it reads the row directly as the pipeline updates it in the background.
 
-    The multilingual embedder is deliberately NOT a request-scoped dependency
-    here: it's only used inside the background task, and requesting it via
-    Depends() would force every cold container's first /runs call to block
-    the 202 response on a full model load/download - this endpoint hit 503s in
-    production for exactly that reason before this fix. run_detection resolves
-    it lazily itself once the response is already on its way back. LLMClient
-    construction is cheap (no local model to load - see its own docstring), so
-    it doesn't carry that risk and stays a normal Depends() here; passed through
-    explicitly rather than letting run_detection default it, so tests' FakeLLMClient
-    override actually takes effect on this codepath too (see run_detection's
-    docstring for why a bare get_llm_client() call inside the background task
-    would silently bypass that override)."""
+    The multilingual embedder is not a request-scoped dependency here: it's only
+    used inside the background task, and resolving it via Depends() would block
+    the 202 response on a full model load on every cold container (this hit 503s
+    in production before this fix). run_detection resolves it lazily itself.
+    LLMClient has no local model to load, so it stays a normal Depends() and is
+    passed through explicitly so tests' FakeLLMClient override still applies."""
     run = await pipeline.create_pending_run(db, payload)
     background_tasks.add_task(
         pipeline.run_detection,
@@ -84,8 +71,7 @@ async def trigger_detection_run(
 async def purge_snapshots(
     payload: PurgeSnapshotsRequest, db: AsyncSession = Depends(get_db)
 ) -> PurgeSnapshotsResponse:
-    """PRD 10.9.1 point 7 - the backend computes which networks are past retention
-    (only it can see whether a report was generated from a snapshot) and hands over
-    the list; deletion is ours since the rows are AI-owned."""
+    """The backend computes which networks are past retention and hands over the
+    list; deletion is ours since the rows are AI-owned."""
     count = await governance.purge_expired_evidence(db, payload.network_ids)
     return PurgeSnapshotsResponse(snapshots_purged=count)

@@ -431,10 +431,8 @@ class LLMClient:
     async def generate_network_label(
         self, claim_statement: str, sample_texts: list[str]
     ) -> str:
-        """Short neutral label for a detected coordinated network (PRD 10.5.5/10.6 -
-        coordinated_network.label). See NETWORK_LABEL_SYSTEM_PROMPT for the
-        governance constraint this must respect (never assert automation/bad-faith/
-        identity, PRD 10.9.1)."""
+        """Short neutral label for a detected coordinated network. Never asserts
+        automation, bad faith, or identity - see NETWORK_LABEL_SYSTEM_PROMPT."""
         joined = "\n---\n".join(sample_texts[:10])
         prompt = f"Claim being supported:\n{claim_statement}\n\nSample posts:\n{joined}"
         result = await self._generate_structured(
@@ -510,8 +508,8 @@ class LLMClient:
     async def generate_debunk_segments(
         self, claim_statement: str, grounding_context: str, sample_texts: list[str]
     ) -> list[DebunkSegmentSchema]:
-        """PRD v1.5 US12 - one tailored debunk draft per audience segment, inferred from
-        a sample of the claim's Supporting-side posts."""
+        """One tailored debunk draft per audience segment, inferred from a sample of
+        the claim's Supporting-side posts."""
         joined = "\n---\n".join(sample_texts[:10])
         prompt = (
             f"Claim being debunked (for context only - do not quote verbatim in any "

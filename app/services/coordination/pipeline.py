@@ -1,23 +1,5 @@
-"""PRD 10.5.8 - Stage 7: execution model. The backend's actual reference contract
-(CIS-Backend internal/aiclient/detection.go, docs/AI-INTEGRATION.md Flow 7/8, pulled
-and reviewed this session) drives every shape here, not PRD 10.5.8 read in isolation:
-`create_pending_run`/`run_detection` are the two halves of POST /api/v1/detection/runs
-(create synchronously so `run_id` is real before the 202 response, then run in the
-background); `claim_ids` is always a list - one for a claim-scoped run, many for a
-topic-batch run, both in one `detection_run` row. The backend computes window_start/
-window_end and sends the full detector parameter set on every call - there is no
-DB-backed config or partial-override concept on this side any more.
-
-Known data-availability gaps, all documented rather than faked: ContentItem carries
-no reshare/quote/reply/outbound-link fields yet, so w_amp is effectively empty until
-ingestion captures them; no ingestion path populates account bio/declared_location/
-client_app yet, so w_meta and the PR metric run on a subset of their stated inputs;
-no follower-graph source exists, so w_struct is always unavailable; content_items has
-no separate posted_at (publish time) field yet, so `network_evidence_post.posted_at`
-is backfilled from ContentItem.created_at (ingest time) as an interim stand-in - see
-docs/COORDINATION.md. Every signal function already treats "unavailable" as
-*unavailable*, not zero - this pipeline inherits that honesty rather than working
-around it."""
+"""Coordinated-network detection pipeline: run creation, signal computation, and
+persistence for POST /api/v1/detection/runs."""
 
 import hashlib
 import logging
@@ -82,11 +64,11 @@ from app.services.multilingual_embedding_service import (
 
 logger = logging.getLogger(__name__)
 
-MIN_CANDIDATES_TO_RUN = 2  # below this, no cluster (min_cluster_size=5 by default) could ever form
+MIN_CANDIDATES_TO_RUN = 2
 DEFAULT_RANDOM_SEED = 42
-MODEL_VERSIONS = {"leidenalg": "0.12", "igraph": "1.0"}  # recorded for reproducibility, 10.5.6 pt 7
-DEFAULT_RETENTION_MONTHS = 24  # initial evidence_snapshot.expires_at; actual purging is backend-driven
-COMPARISON_ACCOUNT_CAP_MULTIPLIER = 1  # comparison set capped to ~network size, see _select_comparison_accounts
+MODEL_VERSIONS = {"leidenalg": "0.12", "igraph": "1.0"}
+DEFAULT_RETENTION_MONTHS = 24
+COMPARISON_ACCOUNT_CAP_MULTIPLIER = 1
 STOP_WORDS = frozenset(
     {"the", "a", "an", "is", "are", "was", "were", "this", "that", "it", "in", "on", "for", "of", "to", "and", "with"}
 )
@@ -97,10 +79,6 @@ def _library_version_string() -> str:
 
 
 def _run_parameters(params: DetectorParameters) -> dict:
-    """Every parameter actually in force for this run, per PRD 10.5.6 point 7 - "a
-    report generated months later can state the exact configuration that produced
-    it." Persisted verbatim, matching the backend's expectation that
-    detection_run.parameters_json holds exactly what it sent."""
     return params.model_dump()
 
 
@@ -108,9 +86,8 @@ def _run_parameters(params: DetectorParameters) -> dict:
 
 
 async def create_pending_run(db: AsyncSession, payload: DetectionRunRequest) -> DetectionRun:
-    """Writes the detection_run row synchronously, before the 202 response, so
-    run_id is real and immediately queryable - the backend never polls, it reads
-    this row directly."""
+    """Writes the detection_run row synchronously so run_id is queryable before the
+    202 response returns."""
     run = DetectionRun(
         scope_claim_ids=[str(c) for c in payload.claim_ids],
         trigger_source=payload.trigger_source,
@@ -143,12 +120,8 @@ async def _load_candidate_posts(
                 ContentItem.created_at >= window_start,
                 ContentItem.created_at <= window_end,
                 ContentItem.author_id.is_not(None),
-                # News sources are excluded from F5 candidate scope entirely (Data
-                # Pipeline & Source Spec v1.0, D6): article timestamps are coarse and
-                # legitimate syndication means outlets publish near-identical text
-                # simultaneously by design - exactly what w_time/w_text would read as
-                # coordination. Only RSS is a live news-type source today; RADIO/
-                # FORUM/OTHER aren't populated by any real fetcher yet.
+                # Syndicated news content publishes near-identical text simultaneously
+                # by design, which would misread as coordination.
                 ContentItem.source != ContentSource.RSS,
             )
         )
@@ -159,7 +132,7 @@ async def _load_candidate_posts(
             account_id=item.author_id,
             text=item.text_en or item.text,
             created_at=item.created_at,
-            source=item.source,  # stored as a plain string column, not a native enum type
+            source=item.source,
             outbound_urls=tuple(item.outbound_urls or ()),
         )
         for item in rows
@@ -169,8 +142,8 @@ async def _load_candidate_posts(
 async def _total_post_counts(
     db: AsyncSession, account_ids: list[str], window_start: datetime, window_end: datetime
 ) -> dict[str, int]:
-    """Each account's post volume across ALL monitored content in W - not just this
-    claim - the denominator the claim-relevance gate needs (10.5.1a)."""
+    """Each account's post volume across all monitored content in the window, not
+    just this claim - the denominator the claim-relevance gate needs."""
     if not account_ids:
         return {}
     rows = (
@@ -190,10 +163,7 @@ async def _total_post_counts(
 async def _get_or_create_accounts(
     db: AsyncSession, platform_account_ids: set[str], platform: str = "unknown"
 ) -> dict[str, uuid.UUID]:
-    """Get-or-create account rows keyed by (platform, platform_account_id) - the
-    table now has a real UNIQUE constraint on that pair (matching the backend's
-    reference schema), so this is also where a concurrent-insert race would surface;
-    fine for the sequential runs this pipeline supports today."""
+    """Get-or-create account rows keyed by (platform, platform_account_id)."""
     if not platform_account_ids:
         return {}
     existing = (
@@ -215,13 +185,8 @@ async def _get_or_create_accounts(
 async def _load_account_provenance(
     db: AsyncSession, platform_account_ids: set[str], platform: str = "unknown"
 ) -> dict[str, SignalAccount]:
-    """Read-only lookup of whatever w_meta provenance already exists on an Account
-    row (from a prior detection run, or - today - only the demo generator, which is
-    the only writer of these fields; no real fetcher populates them yet). Missing
-    account -> not in the returned dict -> caller falls back to an all-fields-None
-    SignalAccount, i.e. today's existing "unavailable" behavior for every account no
-    prior run or the demo has ever touched. Never creates a row - that's still
-    _get_or_create_accounts's job, at persistence time."""
+    """Read-only lookup of w_meta provenance already on an Account row. A missing
+    account means the caller falls back to an all-fields-None SignalAccount."""
     if not platform_account_ids:
         return {}
     existing = (
@@ -260,8 +225,7 @@ async def _load_recurrence_candidates(db: AsyncSession) -> list[RecurrenceCandid
 
 
 def _extract_top_terms(posts: list[SignalPost], limit: int = 5) -> list[str]:
-    """Lightweight recurrence-fingerprint input (10.5.7) - not a PRD-defined signal,
-    just a compact content signature alongside the member-ID set."""
+    """Compact content signature for the recurrence fingerprint."""
     counts: Counter[str] = Counter()
     for p in posts:
         for word in p.text.lower().split():
@@ -277,10 +241,8 @@ def _select_comparison_accounts(
     community_size: int,
     total_posts_by_account: dict[str, int],
 ) -> list[str]:
-    """BEYOND 10.10 (backend gap 7) - US51's "genuine unclustered accounts active on
-    the same claim, for contrast". Ranked by post volume (same tie-break convention
-    as the A_max scale control) for determinism, capped to roughly the network's own
-    size so the comparison set doesn't dwarf the network it's contrasting."""
+    """Unclustered accounts active on the same claim, for graph contrast. Ranked by
+    post volume, capped to roughly the network's own size."""
     unclustered = [a for a in all_candidate_ids if a not in clustered_ids]
     ranked = sorted(unclustered, key=lambda a: total_posts_by_account.get(a, 0), reverse=True)
     cap = max(community_size * COMPARISON_ACCOUNT_CAP_MULTIPLIER, 1)
@@ -309,9 +271,6 @@ def _build_signals(
         ),
         "w_amp": compute_co_amplification(posts),
         "w_meta": compute_provenance_similarity(accounts, half_life_hours=params.provenance_half_life_hours),
-        # None for every real (backend-triggered) run - no follower-graph data
-        # source exists yet. Only ever non-None when demo_seed.py passes
-        # run_detection's synthetic_follower_sets, threaded through from there.
         "w_struct": compute_structural_overlap(follower_sets),
     }
 
@@ -331,9 +290,8 @@ async def _persist_offtopic_cluster(
     fingerprint: str,
     failed_test: str,
 ) -> None:
-    """PRD 10.5.1a point 7 - a real coordinated cluster that isn't about this claim.
-    Suppressed from the network list, retained only for aggregate recalibration
-    review (the backend's - it reads this table directly)."""
+    """A coordinated cluster that isn't about this claim - not surfaced, kept only
+    for recalibration review."""
     db.add(
         OfftopicCluster(
             run_id=run_id,
@@ -359,11 +317,7 @@ async def _persist_offtopic_cluster(
 async def _generate_network_label(
     llm: LLMClient | None, claim_statement: str, cluster_posts: list[SignalPost]
 ) -> str:
-    """LLMClient.generate_network_label, with a deterministic fallback - never
-    blocks persistence on a missing/failed LLM call, matching the graceful-
-    degradation posture used everywhere else in this codebase (e.g.
-    clustering_service.build_claim_from_content_items's harm-classification try/
-    except)."""
+    """Deterministic fallback label if the LLM is unavailable or fails."""
     fallback = f"Coordinated activity: {claim_statement}"[:255]
     if llm is None:
         return fallback
@@ -445,8 +399,6 @@ async def _persist_network(
                 circadian_coverage=entry.circadian_coverage,
                 degree_centrality=entry.degree_centrality,
                 eigenvector_centrality=entry.eigenvector_centrality,
-                # Per-metric contribution breakdown (not just aggregate stats) is a
-                # future refinement - left empty rather than faked.
                 score_contribution={},
                 layout_x=xy[0] if xy else None,
                 layout_y=xy[1] if xy else None,
@@ -489,7 +441,6 @@ async def _persist_network(
                 account_id=account_id_map[post.account_id],
                 post_platform_id=post.post_id,
                 captured_text=post.captured_text,
-                # Interim stand-in for real publish time - see module docstring.
                 posted_at=post.posted_at,
                 content_sha256=post.content_sha256,
                 duplicate_group_id=post.duplicate_group_id,
@@ -514,7 +465,7 @@ async def _persist_network(
             overlap_ratio=relevance_overlap_ratio,
             anchoring_share=relevance_anchoring_share,
             claim_cluster_post_count=relevance_post_count,
-            is_primary_claim=True,  # single-claim link per network - see module docstring
+            is_primary_claim=True,
             passed_relevance_gate=True,
         )
     )
@@ -551,38 +502,16 @@ async def run_detection(
     platform_age_baseline_hours: list[float] | None = None,
     llm: LLMClient | None = None,
 ) -> None:
-    """Runs the full Stage 0-6 pipeline over every claim in claim_ids against the
-    already-created `run_id` row (create_pending_run wrote it synchronously before
-    the 202 response). One run, one or many claims - PRD 10.5.1 point 6: signals and
-    cluster metrics remain computed per claim even in batch mode, so this loops
-    internally rather than pooling candidates across claims (pooling is an optional
-    efficiency optimisation the PRD explicitly does not require).
+    """Runs the pipeline over every claim in claim_ids against the already-created
+    `run_id` row. Loops per claim rather than pooling candidates across claims.
 
-    synthetic_follower_sets: w_struct's only wiring point, always None for the real
-    backend-triggered contract (POST /api/v1/detection/runs never passes it - no
-    follower-graph data source exists for any real platform we've wired up). Exists
-    so app/services/coordination/demo_seed.py can simulate a complete-signal
-    scenario through this exact function, keyed by account_id -> the set of
-    account_ids it "follows". Never persisted anywhere - purely an in-memory signal
-    input for the run it's passed to.
+    synthetic_follower_sets/platform_age_baseline_hours: demo-only signal inputs
+    (see demo_seed.py); always None on a real run since no follower-graph or
+    platform-age-distribution source exists.
 
-    platform_age_baseline_hours: same demo-only story, for PR's age-percentile
-    sub-signal (cluster_metrics._age_percentile_inverted) - this service has no live
-    platform-wide account-age distribution to compare against, so that sub-signal is
-    unavailable (dropped from PR's average, not scored as 0) on every real run
-    unless a caller supplies one.
-
-    llm: used only to generate coordinated_network.label (see
-    LLMClient.generate_network_label) - falls back to a deterministic label built
-    from the claim statement when None or on any failure, never blocks detection.
-    Deliberately NOT auto-defaulted to get_llm_client() here the way embedder is
-    above - every real caller (trigger_detection_run, generate_coordinated_network,
-    scripts/seed_demo_data.py) must resolve and pass it explicitly (Depends() in the
-    two endpoints), same as every other background-task-scheduling endpoint in this
-    codebase. A bare get_llm_client() call from inside a background task bypasses
-    FastAPI's dependency_overrides entirely, which would silently make this the one
-    F5 code path hitting a real LLM in tests - see ARCHITECTURE.md's background-task
-    section for the historical bug this exact pattern already caused once."""
+    llm: not auto-defaulted - callers must resolve and pass it explicitly via
+    Depends(), so a background task never bypasses dependency_overrides in tests.
+    Falls back to a deterministic label if None or on failure."""
     embedder = embedder or get_multilingual_embedding_service()
     session_factory = session_factory or get_session_factory()
 

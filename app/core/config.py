@@ -30,10 +30,8 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = 384
 
     # F5 coordination detection - multilingual, separate from the English-only
-    # embedding model above (needed for Signal 2b, PRD 10.5.2.2/10.5.2.5). This is
-    # the only F5 setting left here - every detection-pipeline tunable (PRD 10.11)
-    # is sent in full by the backend on every POST /api/v1/detection/runs call now
-    # (DetectorParameters), not read from static config or a DB row.
+    # embedding model above. Every other detection-pipeline tunable is sent in
+    # full by the backend on every POST /api/v1/detection/runs call instead.
     COORDINATION_MULTILINGUAL_MODEL_NAME: str = (
         "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     )
@@ -46,26 +44,19 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_JSON: bool | None = None
 
-    # Go backend integration (see docs/AI-INTEGRATION.md in the CIS-Backend repo - the
-    # shared Postgres DB is read-only from this side; all coordination is these 3 HTTP
-    # touchpoints). Both keys are optional shared secrets, empty by default (private
-    # network only, no key exchanged) - see that doc's "Configuration" section.
+    # Go backend integration. Both keys are optional shared secrets, empty by
+    # default (private network only, no key exchanged).
     BACKEND_URL: str = ""  # e.g. https://cis-backend-465014351308.asia-southeast1.run.app
     AI_SERVICE_API_KEY: str = ""  # validates inbound X-API-Key from the backend, if set
     INTERNAL_API_KEY: str = ""  # sent as X-Internal-Key on our callback to the backend, if set
 
-    # Data Pipeline & Source Spec v1.0, Tier B ground-truth grounding (see
-    # docs/SOURCES.md). Free and optional - silently skipped, never faked, when
-    # unset/empty. Shared with the crawler's own GOOGLE_API_KEY (crawler/config.py) -
-    # one Google Cloud project API key, same value, both "YouTube Data API v3" and
-    # "Fact Check Tools API" enabled on it. Kept as a separate setting here (not
-    # imported from crawler/) since this service and the crawler are separate
-    # deployables with independently-injected env vars in production.
+    # Ground-truth grounding (Fact Check Tools API). Free and optional - silently
+    # skipped when unset/empty. Shared with the crawler's own GOOGLE_API_KEY (one
+    # Google Cloud project, both "YouTube Data API v3" and "Fact Check Tools API"
+    # enabled), kept as a separate setting since the two are separate deployables.
     GOOGLE_API_KEY: str = ""
-    # BMKG's adm4 (kelurahan-level) codes to poll for active weather warnings, used to
-    # ground the Harm (H) classifier - see app/services/hazard_context_service.py.
-    # Only one code is verified so far (Kemayoran, central Jakarta); extend against
-    # Kepmendagri 100.1.1-6117/2022 as more are confirmed rather than guessed.
+    # BMKG's adm4 (kelurahan-level) codes to poll for active weather warnings, used
+    # to ground the Harm (H) classifier. Only Kemayoran is verified so far.
     BMKG_ADM4_CODES: list[str] = Field(default_factory=lambda: ["31.71.03.1001"])
 
     @property

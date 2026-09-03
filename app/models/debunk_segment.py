@@ -21,11 +21,10 @@ if TYPE_CHECKING:
 
 
 class ClaimDebunkSegment(Base):
-    """One tailored Debunk Activity draft per audience segment (PRD v1.5 US12) -
-    replaces the single generic draft (Claim.activity_content). Generated once, at
-    claim creation, and never regenerated on view - same caching rule as
-    activity_content. Existing/Generic claims only; this table is optional on the
-    backend's side, which falls back to activity_content when it's empty."""
+    """One tailored Debunk Activity draft per audience segment - replaces the single
+    generic draft (Claim.activity_content). Generated once, at claim creation, and
+    never regenerated on view. Existing/Generic claims only; the backend falls back
+    to activity_content when this table is empty."""
 
     __tablename__ = "claim_debunk_segments"
     __table_args__ = (

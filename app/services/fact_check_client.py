@@ -1,16 +1,6 @@
-"""Google Fact Check Tools API - a live, free secondary lookup for Falseness (F)
-scoring (app/services/falseness_service.py), used only when the OfficialSource
-pgvector match misses. Aggregates ClaimReview markup across every Indonesian IFCN
-signatory (Mafindo, CekFakta consortium, etc.) in one query - no bulk download
-exists for this source, so it's queried live per claim rather than seeded like
-scripts/seed_debunk_corpus.py's TurnBackHoax corpus.
-
-Optional and free (console.cloud.google.com -> enable "Fact Check Tools API" on the
-same project as GOOGLE_API_KEY - it's shared with the crawler's YouTube fetcher, one
-key with both APIs enabled on it): silently returns no results whenever
-settings.GOOGLE_API_KEY is unset, or the API errors/times out - a live external
-dependency must degrade, never raise, into the scoring path. See docs/SOURCES.md.
-"""
+"""Google Fact Check Tools API client: a secondary lookup for Falseness (F) scoring,
+used when the OfficialSource match misses. Returns no results if GOOGLE_API_KEY is
+unset or the request fails."""
 
 import httpx
 

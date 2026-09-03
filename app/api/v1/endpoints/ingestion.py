@@ -42,9 +42,7 @@ router = APIRouter(prefix="/ingest", tags=["ingestion"])
 async def _analyze_and_build_batch(
     entries: list[ContentItemCreate], llm: LLMClient, embedder: EmbeddingService
 ) -> tuple[list[ContentItem], list[dict]]:
-    """Analyze concurrently (getting text_en per entry), then one batched embed call
-    over all translations - preserves embed_batch's performance win despite analysis
-    now having to run before embedding."""
+    """Analyze each entry concurrently, then embed all translations in one batched call."""
 
     async def _analyze(entry: ContentItemCreate):
         try:
@@ -84,8 +82,7 @@ async def ingest_content(
     embedder: EmbeddingService = Depends(get_embedding_service),
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> ContentItem:
-    """Analyze (translating to English), embed, persist. Auto-triggers clustering in
-    the background. Idempotent on external_ref - a repeat returns the existing item."""
+    """Analyzes, translates, embeds, and persists a content item; idempotent on external_ref."""
     if payload.external_ref:
         existing = (
             await db.execute(

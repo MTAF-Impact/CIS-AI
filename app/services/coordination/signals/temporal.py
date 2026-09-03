@@ -1,6 +1,5 @@
-"""PRD 10.5.2.1 - Signal 1: temporal synchrony (w_time). Null-model correction is
-mandatory: raw co-occurrence is dominated by the diurnal rhythm (everyone posts at
-lunchtime), so this is never used unadjusted."""
+"""Signal: temporal synchrony (w_time). Raw co-occurrence is dominated by diurnal
+rhythm, so it's always null-model corrected before use."""
 
 from collections import defaultdict
 
@@ -26,8 +25,8 @@ def compute_temporal_synchrony(
     significantly exceeds the null model's expectation; pairs that don't clear the
     null are simply absent (equivalent to w_time = 0 downstream).
 
-    Null model: Poisson-binomial closed form (preferred per spec over 1,000
-    permutations - ~100x cheaper, deterministic). Uses a rank-1 probabilistic
+    Null model: Poisson-binomial closed form, ~100x cheaper than a permutation test
+    and deterministic. Uses a rank-1 probabilistic
     relaxation of the fixed-marginal permutation null (a standard approximation for
     this class of co-occurrence null model): p(account active in bin b) is
     proportional to both the account's total active-bin count and bin b's share of

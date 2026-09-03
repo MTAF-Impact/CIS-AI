@@ -1,5 +1,4 @@
-"""Read-only listing of fault_lines - the living exemplar corpus a relevance-filtering
-crawler fetches each run (see docs/crawler design), rather than a separately-curated list."""
+"""Read-only listing of fault lines used as grounding examples."""
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select

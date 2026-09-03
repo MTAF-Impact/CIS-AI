@@ -35,7 +35,7 @@ async def list_alerts(
     limit: int = Query(default=50, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> AlertListResult:
-    """F3 watchlist table [C3] - sorted most-recently-added first (US30)."""
+    """Watchlist table, sorted most-recently-added first."""
     settings = await admin_service.get_settings(db)
 
     stmt = select(ClaimAlert, Claim).join(Claim, Claim.id == ClaimAlert.claim_id)

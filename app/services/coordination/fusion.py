@@ -1,7 +1,5 @@
-"""PRD 10.5.3 - Stage 2: signal fusion and edge pruning. The multi-signal rule here is
-the pipeline's primary false-positive control - no edge, and therefore no network, may
-ever be constructed from a single behavioural axis. Synchrony alone is a timezone.
-Duplication alone is a hashtag. Provenance alone is a signup surge."""
+"""Signal fusion and edge pruning. No edge may be constructed from a single
+behavioural axis - synchrony alone is a timezone, duplication alone is a hashtag."""
 
 from dataclasses import dataclass
 
@@ -34,8 +32,7 @@ def _effective_weights(
     base_weights: dict[SignalName, float],
 ) -> tuple[dict[SignalName, float], list[SignalName]]:
     """Redistributes an entirely-unavailable family's weight proportionally across
-    the rest (10.5.2.5), distinct from a pair simply not clearing a signal's own
-    threshold (which contributes 0.0 for that pair, not a redistribution)."""
+    the rest."""
     unavailable = [name for name in base_weights if signals.get(name) is None]
     available = [name for name in base_weights if name not in unavailable]
     unavailable_weight = sum(base_weights[name] for name in unavailable)
@@ -59,11 +56,8 @@ def fuse_and_prune(
     min_signal_families: int = MIN_SIGNAL_FAMILIES_PER_EDGE,
 ) -> tuple[list[FusedEdge], list[SignalName]]:
     """signals maps each family name to its pairwise score dict, or None if that
-    family was entirely unavailable this run (e.g. w_struct with no follower data).
-    Returns (retained edges, unavailable family names) - the caller records the
-    latter on detection_run.signals_unavailable. min_signal_families is
-    backend-configurable (CISDetectorSettings.MinSignalFamilies) - the PRD's range
-    starts at 2, one is never permissible."""
+    family was entirely unavailable this run. Returns (retained edges, unavailable
+    family names)."""
     base_weights = weights or DEFAULT_WEIGHTS
     effective_weights, unavailable = _effective_weights(signals, base_weights)
 

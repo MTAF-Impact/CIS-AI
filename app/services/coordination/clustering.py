@@ -1,7 +1,6 @@
-"""PRD 10.5.4 - Stage 3: community detection. Leiden is required over Louvain
-deliberately: Louvain can produce internally disconnected communities, which here
-would mean a "network" whose members have no behavioural relationship to each other -
-indefensible in a report."""
+"""Community detection. Leiden over Louvain: Louvain can produce internally
+disconnected communities, which here would mean a "network" whose members have no
+behavioural relationship to each other."""
 
 from dataclasses import dataclass
 
@@ -44,8 +43,8 @@ def _k_core_subgraph(graph: ig.Graph, k: int) -> ig.Graph:
 
 
 def _conductance(graph: ig.Graph, member_indices: set[int]) -> float:
-    """External edge weight over total incident edge weight - directly expresses
-    "dense internally, isolated externally" (CO metric, 10.5.5)."""
+    """External edge weight over total incident edge weight - "dense internally,
+    isolated externally"."""
     internal_weight = 0.0
     incident_weight = 0.0
     for edge in graph.es:
@@ -82,10 +81,8 @@ def detect_communities(
     rho_min: float = DEFAULT_RHO_MIN,
     random_seed: int = DEFAULT_RANDOM_SEED,
 ) -> list[DetectedCommunity]:
-    """Retention filters here: size >= n_min, internal density >= rho_min. The
-    claim-relevance gate (relevance_gate.py) and confidence banding (confidence.py)
-    are applied separately by the orchestrator, since they need claim/allowlist
-    context this function doesn't have."""
+    """Retention filters here: size >= n_min, internal density >= rho_min. Claim
+    relevance and confidence banding are applied separately by the orchestrator."""
     graph = _build_graph(edges, account_ids)
     core = _k_core_subgraph(graph, k_core)
     if core.vcount() == 0:

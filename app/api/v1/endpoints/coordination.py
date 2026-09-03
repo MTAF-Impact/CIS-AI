@@ -12,5 +12,5 @@ async def check_cib(
     payload: CIBCheckRequest,
     embedder: EmbeddingService = Depends(get_embedding_service),
 ) -> CIBCheckResponse:
-    """Deterministic CIB heuristic - groundwork for F5, which is deferred in the PRD."""
+    """Deterministic coordinated-behavior heuristic."""
     return detect_coordinated_behavior(payload.posts, embedder=embedder)

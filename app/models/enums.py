@@ -28,8 +28,8 @@ class Stance(str, enum.Enum):
 
 
 class Sentiment(str, enum.Enum):
-    """A content item's own emotional valence, independent of any claim (PRD v1.5
-    6.6.1 - the Baseline Climate Sentiment half of F6's Climate Sentiment Index).
+    """A content item's own emotional valence, independent of any claim - the
+    Baseline Climate Sentiment half of F6's Climate Sentiment Index.
 
     Not the same axis as Stance: stance is a position relative to a specific claim
     and only exists once a post is clustered, while sentiment is assessed on every
@@ -78,7 +78,7 @@ class DetectionRunStatus(str, enum.Enum):
 
 
 class ConfidenceBand(str, enum.Enum):
-    """PRD 10.6.2 - a network's evidentiary strength, distinct from its raw score."""
+    """A network's evidentiary strength, distinct from its raw score."""
 
     LOW = "low"
     MEDIUM = "medium"

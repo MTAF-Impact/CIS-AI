@@ -37,12 +37,9 @@ class ContentItem(Base):
     # "rss:<feed_url>:<guid>". Null (and unenforced) for manual/synthetic ingestion.
     external_ref: Mapped[str | None] = mapped_column(String(512), unique=True, nullable=True)
 
-    # F5's w_amp (co-amplification) input - see SignalPost.outbound_urls in
-    # app/services/coordination/types.py. No real fetcher populates this yet (no
-    # platform we've wired up exposes reshare/quote/reply targets or outbound links
-    # at ingest) - it exists so app/services/coordination/demo_seed.py can simulate
-    # a complete-signal scenario through the real, unmodified pipeline rather than a
-    # separate demo-only code path. NULL/empty is the honest default for real content.
+    # F5's w_amp (co-amplification) input. No real fetcher populates this yet - it
+    # exists so demo_seed.py can simulate a complete-signal scenario through the
+    # real, unmodified pipeline.
     outbound_urls: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
     # LLM analysis output
@@ -52,10 +49,9 @@ class ContentItem(Base):
     )
     extracted_claim: Mapped[str | None] = mapped_column(Text, nullable=True)
     underlying_grievance: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # PRD v1.5 6.6.1 - feeds F6's Climate Sentiment Index. Independent of `stance`;
-    # see Sentiment's docstring for why the two must never be conflated. NULL means
-    # not yet classified, and still counts toward CSI's denominator (a classification
-    # backlog must not make the city look calmer than it is).
+    # Feeds F6's Climate Sentiment Index. Independent of `stance`; see Sentiment's
+    # docstring for why the two must never be conflated. NULL means not yet
+    # classified, and still counts toward CSI's denominator.
     sentiment: Mapped[Sentiment | None] = mapped_column(String(16), nullable=True)
 
     # NULL until clustered - only assessable relative to a specific claim.

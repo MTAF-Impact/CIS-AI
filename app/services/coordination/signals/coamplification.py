@@ -1,7 +1,5 @@
-"""PRD 10.5.2.3 - Signal 3: co-amplification (w_amp). Two accounts consistently
-boosting the same *unpopular* things share real signal; two accounts boosting a post
-with millions of views share nothing - the inverse-popularity weighting is
-non-negotiable per spec."""
+"""Signal: co-amplification (w_amp). Weighted toward unpopular shared targets -
+boosting the same viral post together is not a coordination signal."""
 
 from collections import defaultdict
 

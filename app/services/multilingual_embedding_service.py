@@ -10,8 +10,8 @@ logger = logging.getLogger(__name__)
 
 class MultilingualEmbeddingService:
     """Dense text embeddings via a local multilingual sentence-transformers model -
-    used for F5's semantic-paraphrase signal (PRD 10.5.2.2), separate from the
-    English-only EmbeddingService used for claim/topic embeddings."""
+    used for F5's semantic-paraphrase signal, separate from the English-only
+    EmbeddingService used for claim/topic embeddings."""
 
     def __init__(self, model_name: str | None = None) -> None:
         self._model_name = model_name or settings.COORDINATION_MULTILINGUAL_MODEL_NAME

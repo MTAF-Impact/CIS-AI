@@ -1,9 +1,5 @@
-"""Shared guard for reset_schema.py/seed_demo_data.py - both scripts write
-destructively to tables the Go backend holds dangling (no-FK) references into
-(cis_claim_reviews.claim_id, cis_claim_alerts.claim_id, cis_policies.ai_policy_id,
-etc). Running either against a backend-connected database silently orphans those
-references - nothing errors, the backend UI just quietly shows wrong things. See
-AI_REQUIREMENT_FOR_INTEGRATION_SUMMARY_V1.md, ask F1."""
+"""Shared guard for reset_schema.py and seed_demo_data.py: refuses to run
+destructively against a database the Go backend is connected to."""
 
 import sys
 

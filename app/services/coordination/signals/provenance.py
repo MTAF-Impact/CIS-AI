@@ -1,7 +1,6 @@
-"""PRD 10.5.2.4 - Signal 4: provenance & identity similarity (w_meta). Weak alone -
-new accounts and heavy posters are both ordinary - and deliberately low-weighted in
-fusion. Missing fields are absent, never zero-similarity: conflating "unknown" with
-"different" would systematically depress scores for platforms with sparser metadata."""
+"""Signal: provenance & identity similarity (w_meta). Missing fields are absent, not
+zero-similarity - conflating "unknown" with "different" would depress scores for
+platforms with sparser metadata."""
 
 import math
 import re
