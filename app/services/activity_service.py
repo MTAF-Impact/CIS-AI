@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.claim import Claim
 from app.models.debunk_segment import ClaimDebunkSegment
-from app.services import rag_service
+from app.services import config_service, rag_service
+from app.services.config_service import RuntimeConfig
 from app.services.embedding_service import EmbeddingService
 from app.services.llm_client import LLMClient
 
@@ -20,12 +21,15 @@ async def generate_and_cache_debunk_activity(
     llm: LLMClient,
     embedder: EmbeddingService,
     supporting_texts: list[str] | None = None,
+    config: RuntimeConfig | None = None,
 ) -> None:
     """Debunk Activity for an Existing claim - the Truth Sandwich, once only. Also
     generates the per-audience-segment drafts (PRD v1.5 US12) from the same
     Supporting-side sample, cached the same way and guarded by the same early return."""
     if claim.activity_content is not None:
         return
+
+    config = config or await config_service.get_config(db)
 
     fault_lines = await rag_service.retrieve_relevant_fault_lines(
         db, claim.claim_statement, embedder
@@ -46,7 +50,9 @@ async def generate_and_cache_debunk_activity(
     claim.debunk_reiterated_fact = content.reiterated_fact
     claim.activity_generated_at = datetime.now(UTC)
 
-    await _generate_debunk_segments(db, claim, llm, grounding_context, supporting_texts)
+    await _generate_debunk_segments(
+        db, claim, llm, grounding_context, supporting_texts, config.debunk_segment_max_count
+    )
 
 
 async def _generate_debunk_segments(
@@ -55,6 +61,7 @@ async def _generate_debunk_segments(
     llm: LLMClient,
     grounding_context: str,
     supporting_texts: list[str] | None,
+    max_count: int,
 ) -> None:
     """PRD v1.5 US12. Failure here never blocks the generic draft above, which the
     backend documents as the fallback the FE renders when this table is empty."""
@@ -74,8 +81,11 @@ async def _generate_debunk_segments(
     # the caller's eventual commit - which, from cluster_unclustered_content's
     # Pass 2, is one transaction shared by every claim created in that run. A
     # naming collision on one claim's segments would then roll back all of them.
+    # Dedupe BEFORE capping to max_count (AP-21, ai.debunk_segment_max_count) so a
+    # dropped duplicate doesn't itself eat into the cap - the prompt already orders
+    # segments most-exposed-first, so slicing after dedup keeps that ordering intact.
     seen_names: set[str] = set()
-    rank = 0
+    deduped = []
     for segment in segments:
         if segment.segment_name in seen_names:
             logger.warning(
@@ -85,6 +95,9 @@ async def _generate_debunk_segments(
             )
             continue
         seen_names.add(segment.segment_name)
+        deduped.append(segment)
+
+    for rank, segment in enumerate(deduped[:max_count]):
         db.add(
             ClaimDebunkSegment(
                 claim_id=claim.id,
@@ -94,7 +107,6 @@ async def _generate_debunk_segments(
                 rank=rank,
             )
         )
-        rank += 1
 
 
 def render_prebunk_activity(inoculation_explainer: str) -> str:

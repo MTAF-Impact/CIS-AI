@@ -28,13 +28,10 @@ values (decided with the user, 2026-09-03):
   Diverging from `24` is an intentional follow-up, not something that should happen
   implicitly just because this table now exists.
 
-**Not yet wired into scoring**, even though `cis_settings` has rows for them: the
-Reach normalization window (`scoring.reach_normalization_window_days`, AP-10 — needs
-a real query-level time filter added to `clustering_service._reach_inputs`, not just
-a config read) and the debunk-segment cap (`ai.debunk_segment_max_count`, AP-21).
-Both are real behavior changes the source doc itself flags as deserving their own
-before/after comparison, deferred on purpose rather than landed silently alongside
-this pass.
+**Every parameter in the catalog is now wired**, including the two the first pass
+deferred: the Reach normalization window (`scoring.reach_normalization_window_days`,
+AP-10 — a real time filter in `clustering_service._reach_inputs`, see R below) and the
+debunk-segment cap (`ai.debunk_segment_max_count`, AP-21 — see `activity_service.py`).
 
 ## Design principle
 
@@ -77,11 +74,17 @@ R_raw = w1·log(1+Impressions) + w2·log(1+UniqueAuthors)
 R = min-max normalize R_raw to [0, 100], scoped per-topic
 ```
 
-- `Impressions` — `SUM(content_items.impressions)` across the claim's Supporting posts.
-- `UniqueAuthors` — `COUNT(DISTINCT content_items.author_id)`, Supporting posts.
-- `ContentCount` — `COUNT(*)`, Supporting posts.
-- `DistinctPlatforms` — `COUNT(DISTINCT content_items.source)`, Supporting posts;
-  `TotalMonitoredPlatforms = 5` (`len(ContentSource)`).
+- All three below are scoped to a trailing window (`scoring.reach_normalization_window_days`,
+  defaults to `90` days, AP-10) — `content_items.created_at >= now - window`. A claim's
+  Reach is about its current standing, not a lifetime-cumulative count; without this a
+  claim from months ago with a lot of old volume could keep outranking one currently
+  spreading fast.
+- `Impressions` — `SUM(content_items.impressions)` across the claim's Supporting posts
+  in that window.
+- `UniqueAuthors` — `COUNT(DISTINCT content_items.author_id)`, Supporting posts in window.
+- `ContentCount` — `COUNT(*)`, Supporting posts in window.
+- `DistinctPlatforms` — `COUNT(DISTINCT content_items.source)`, Supporting posts in
+  window; `TotalMonitoredPlatforms = 5` (`len(ContentSource)`).
 - `w1=w2=w3=w4=0.25` by default (`scoring.reach_weight_*` in `cis_settings`,
   `ReachWeights` in code — equal-weighted placeholders; the PRD leaves per-component
   weighting unspecified, these are **not** sum-constrained since min-max

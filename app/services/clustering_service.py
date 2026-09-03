@@ -130,13 +130,23 @@ async def _increment_topic_volume_bucket(
     bucket.supporting_volume += 1
 
 
-async def _reach_inputs(db: AsyncSession, claim_id: uuid.UUID) -> tuple[int, int, int, int]:
+async def _reach_inputs(
+    db: AsyncSession, claim_id: uuid.UUID, window_days: int
+) -> tuple[int, int, int, int]:
+    """Reach's inputs, scoped to a trailing window (AP-10) so the baseline follows the
+    recent past rather than the whole history of the deployment - a claim's Reach score
+    is about its current standing, not a lifetime-cumulative count."""
+    window_start = datetime.now(UTC) - timedelta(days=window_days)
     stmt = select(
         func.coalesce(func.sum(ContentItem.impressions), 0),
         func.count(func.distinct(ContentItem.author_id)),
         func.count(ContentItem.id),
         func.count(func.distinct(ContentItem.source)),
-    ).where(ContentItem.claim_id == claim_id, ContentItem.stance == Stance.SUPPORTING)
+    ).where(
+        ContentItem.claim_id == claim_id,
+        ContentItem.stance == Stance.SUPPORTING,
+        ContentItem.created_at >= window_start,
+    )
     impressions, unique_authors, content_count, distinct_platforms = (await db.execute(stmt)).one()
     return impressions, unique_authors, content_count, distinct_platforms
 
@@ -161,7 +171,7 @@ async def renormalize_topic_reach(
     raw_values = {}
     for claim in claims:
         impressions, unique_authors, content_count, distinct_platforms = await _reach_inputs(
-            db, claim.id
+            db, claim.id, config.reach_normalization_window_days
         )
         raw_values[claim.id] = scoring_engine.raw_reach(
             impressions, unique_authors, content_count, distinct_platforms, weights=config.reach_weights
@@ -422,7 +432,7 @@ async def build_claim_from_content_items(
             weights=config.harm_weights,
         )
 
-    await generate_and_cache_debunk_activity(db, claim, llm, embedder, supporting_texts)
+    await generate_and_cache_debunk_activity(db, claim, llm, embedder, supporting_texts, config)
     return claim
 
 

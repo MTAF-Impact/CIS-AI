@@ -49,10 +49,6 @@ CACHE_TTL_SECONDS = 30.0  # matches the backend's own SETTINGS_CACHE_TTL
 # reaches this table some other way.
 POLICY_DISRUPTION_WEIGHT_CEILING = 0.25
 
-# Reach's 90-day trailing window (AP-10) and the debunk-segment cap (AP-21) are not
-# threaded into scoring yet - see docs/SCORING.md "Dynamic parameters, not yet wired"
-# for why. Their defaults are still read here so a future wiring pass has nowhere
-# else to add them.
 DEFAULTS: dict[str, str] = {
     "scoring.weight_reach": str(DEFAULT_SCORE_WEIGHTS.reach),
     "scoring.weight_velocity": str(DEFAULT_SCORE_WEIGHTS.velocity),
@@ -104,6 +100,7 @@ class RuntimeConfig:
     score_weights: ScoreWeights
     harm_weights: HarmWeights
     reach_weights: ReachWeights
+    reach_normalization_window_days: int
     velocity_interval_hours: float
     npr_window_hours: float
     velocity_zscore_min: float
@@ -116,6 +113,7 @@ class RuntimeConfig:
     claim_attach_threshold: float
     topic_attach_threshold: float
     claim_prefilter_threshold: float
+    debunk_segment_max_count: int
 
 
 def _build(raw: dict[str, str]) -> RuntimeConfig:
@@ -167,6 +165,7 @@ def _build(raw: dict[str, str]) -> RuntimeConfig:
             content_count=as_float("scoring.reach_weight_content_count"),
             distinct_platforms=as_float("scoring.reach_weight_platform_spread"),
         ),
+        reach_normalization_window_days=as_int("scoring.reach_normalization_window_days"),
         velocity_interval_hours=as_float("scoring.velocity_interval_hours"),
         npr_window_hours=as_float("scoring.npr_window_hours"),
         velocity_zscore_min=as_float("scoring.velocity_zscore_min"),
@@ -179,6 +178,7 @@ def _build(raw: dict[str, str]) -> RuntimeConfig:
         claim_attach_threshold=as_float("clustering.claim_attach_threshold"),
         topic_attach_threshold=as_float("clustering.topic_attach_threshold"),
         claim_prefilter_threshold=as_float("matchmaking.claim_prefilter_threshold"),
+        debunk_segment_max_count=as_int("ai.debunk_segment_max_count"),
     )
 
 
@@ -192,13 +192,18 @@ async def load_config(db: AsyncSession) -> RuntimeConfig:
     """Always hits the DB - bypasses the cache. Most callers want get_config()
     instead; this is the cache's own refill path."""
     try:
-        rows = (await db.execute(text("SELECT key, value FROM cis_settings"))).all()
+        # A SAVEPOINT (not a plain db.rollback()) - this session is very often
+        # mid-transaction with real, already-flushed-but-uncommitted work from the
+        # caller (e.g. a just-created Claim row). A bare rollback() on failure would
+        # discard that too, not just this SELECT - begin_nested() scopes the rollback
+        # to just this statement.
+        async with db.begin_nested():
+            rows = (await db.execute(text("SELECT key, value FROM cis_settings"))).all()
     except DBAPIError:
         logger.warning(
             "cis_settings not readable (table may not exist yet) - using built-in defaults",
             exc_info=True,
         )
-        await db.rollback()  # a failed statement poisons the rest of this transaction otherwise
         return DEFAULT_CONFIG
     return _build({key: value for key, value in rows})
 
