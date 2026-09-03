@@ -18,9 +18,7 @@ class GenerateGenericClaimResponse(BaseModel):
 
 
 class GenerateCoordinatedNetworkResponse(BaseModel):
-    """Acknowledgement only, mirroring DetectionRunResponse - the detection_run row
-    is already written (status=pending) by the time this returns, so callers poll
-    that table directly rather than this endpoint."""
+    """Acknowledgement only; poll the detection_run table for status."""
 
     run_id: uuid.UUID
     status: str

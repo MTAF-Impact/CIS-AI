@@ -67,12 +67,11 @@ async def generate_coordinated_network(
     embedder: EmbeddingService = Depends(get_embedding_service),
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> GenerateCoordinatedNetworkResponse:
-    """Demo/testing utility, not part of the backend's real F5 contract: synthesizes
-    a coordinated-looking content burst (new demo claim if claim_id is omitted, else
-    attached to an existing Existing claim) and runs it through the real detection
-    pipeline. The detection_run row is written synchronously (status=pending) before
-    this returns, mirroring POST /api/v1/detection/runs, so a caller can poll that
-    row immediately while detection finishes in the background."""
+    """Demo/testing utility: synthesizes a coordinated-looking content burst (new
+    demo claim if claim_id is omitted, else attached to an existing Existing claim)
+    and runs it through the real detection pipeline. The detection_run row is
+    written synchronously (status=pending) before this returns, so a caller can
+    poll it immediately while detection finishes in the background."""
     try:
         claim, run, run_kwargs = await demo_seed.generate_demo_coordinated_network(
             db, llm, embedder, claim_id, topic_hint
@@ -92,24 +91,18 @@ async def generate_coordinated_network(
 @router.post("/run-crawler", status_code=202)
 async def run_crawler(background_tasks: BackgroundTasks) -> dict:
     """Runs crawler/main.py in-process instead of as a separate Cloud Run Job -
-    this service and the crawler ship as one deployment/one container now, not two.
-    crawler/ itself is otherwise completely unchanged: it still submits over its own
-    HTTP client, just pointed at this same container's own port via localhost
-    (Cloud Run's $PORT isn't known until runtime, so this is resolved here rather
-    than hardcoded). See docs/CRAWLER.md.
+    this service and the crawler ship as one deployment/one container. Pointed at
+    this same container's own port via localhost, since Cloud Run's $PORT isn't
+    known until runtime.
 
-    Deliberately overrides AI_SERVICE_URL unconditionally rather than only filling
-    it in when unset - self-loopback is correct 100% of the time this route runs (it
-    IS the AI service calling itself), so an AI_SERVICE_URL left over from some other
-    config (e.g. copy-pasted standalone-Job env vars) must never win here."""
+    Overrides AI_SERVICE_URL unconditionally: self-loopback is correct 100% of the
+    time this route runs, so a stale AI_SERVICE_URL from some other config must
+    never win here."""
     os.environ["AI_SERVICE_URL"] = f"http://localhost:{os.environ.get('PORT', '8000')}"
-    # Local import - crawler/'s deps (feedparser, telethon) are only needed by this
-    # one route, not the rest of the service.
+    # Local import - crawler/'s deps are only needed by this one route.
     from crawler.config import get_settings as get_crawler_settings
     from crawler.main import run as crawler_run
 
-    # Fail fast with a visible HTTP error rather than a 202 that silently dies in the
-    # background - YouTube (GOOGLE_API_KEY) is a required source now, see main.run().
     if not get_crawler_settings().GOOGLE_API_KEY:
         raise HTTPException(
             status_code=503,

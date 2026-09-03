@@ -1,8 +1,6 @@
-"""PRD 10.5.1 - Stage 0: candidate scope and selection. The claim-scoped observation
-rule (point 5 - posts must already belong to one claim's supporting-side cluster
-within window W) is the caller's responsibility (the pipeline orchestrator queries
-ContentItem accordingly); this module only applies exclusions and the A_max cap to an
-already-scoped post list."""
+"""Candidate scope and selection. The caller is responsible for scoping posts to a
+claim's supporting-side cluster within the window; this module only applies
+exclusions and the candidate cap to an already-scoped post list."""
 
 from dataclasses import dataclass
 
@@ -25,9 +23,8 @@ def select_candidates(
     self_exclusion_account_ids: set[str] | None = None,
     a_max: int = DEFAULT_A_MAX,
 ) -> CandidateSelection:
-    """Excludes declared-coordination allowlist accounts (US56) and the city's own
-    communications estate (self-exclusion, F4) before graph construction, then caps
-    the remaining candidate set by post volume if it exceeds a_max."""
+    """Excludes allowlisted and self-exclusion accounts before graph construction,
+    then caps the remaining candidate set by post volume if it exceeds a_max."""
     excluded = (allowlisted_account_ids or set()) | (self_exclusion_account_ids or set())
     filtered_posts = [p for p in posts if p.account_id not in excluded]
 

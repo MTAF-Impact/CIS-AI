@@ -1,7 +1,5 @@
-"""PRD 10.5.1a - claim-relevance gate. Anchoring a run to a claim is not sufficient to
-make the clusters it finds *about* that claim; every detected cluster must pass these
-three tests against the claim it's being attributed to, or it's suppressed as an
-off-topic coordinated cluster (real coordination - just not the city's problem)."""
+"""Claim-relevance gate. A detected cluster must pass three tests against the claim
+it's attributed to, or it's suppressed as an off-topic coordinated cluster."""
 
 from dataclasses import dataclass
 
@@ -32,12 +30,9 @@ def evaluate_claim_relevance(
     omega_min: float = DEFAULT_OMEGA_MIN,
 ) -> RelevanceResult:
     """claim_scoped_posts: this claim's supporting-cluster posts (any member, not
-    just this cluster's). total_posts_by_account: each member's post count across ALL
-    monitored content in the same window W - the caller must supply this via a
-    broader query, since it's explicitly outside the claim-scoped-observation rule
-    that governs every signal in Stage 1/2. A member missing from this dict falls
-    back to its claim-scoped count (i.e. assumes 100% of its known activity is on
-    this claim), a conservative default when broader data isn't available."""
+    just this cluster's). total_posts_by_account: each member's post count across
+    all monitored content in the window. A member missing from this dict falls back
+    to its claim-scoped count, assuming 100% of its activity is on this claim."""
     member_set = set(member_account_ids)
     posts_per_account: dict[str, int] = dict.fromkeys(member_set, 0)
     for p in claim_scoped_posts:

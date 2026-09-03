@@ -1,7 +1,6 @@
-"""PRD 10.5.6 - Stage 5: evidence extraction and snapshotting. Every detected network
-produces an immutable evidence snapshot at detection time - this is a hard
-requirement, because operators frequently delete content once a campaign concludes,
-and a report that cannot show its own evidence is worthless."""
+"""Evidence extraction and snapshotting. Every detected network produces an
+immutable evidence snapshot at detection time, since content is often deleted once
+a campaign concludes."""
 
 import hashlib
 import logging
@@ -89,7 +88,7 @@ def build_burst_timeline(
     cluster_posts: list[SignalPost], bin_width_seconds: int = BURST_BIN_WIDTH_SECONDS
 ) -> list[BurstBin]:
     """Full per-bin volume series across the cluster's own posting window - every
-    bin, not just anomalous ones, so the detail page (US53) can render a real chart."""
+    bin, not just anomalous ones."""
     if not cluster_posts:
         return []
     bin_counts: dict[int, int] = defaultdict(int)
@@ -123,9 +122,8 @@ def build_representative_content(
     common_phrase_allowlist: set[str] | None = None,
 ) -> list[EvidencePost]:
     """Groups duplicate posts into connected components via union-find over the
-    pairwise duplicate flags (2a/2b); the earliest post in each group is canonical.
-    Every post is captured with its SHA-256 regardless of group membership, so a
-    later-deleted post still has durable evidence (US54)."""
+    pairwise duplicate flags; the earliest post in each group is canonical. Every
+    post is captured with its SHA-256 regardless of group membership."""
     embedder = embedder or get_multilingual_embedding_service()
     eligible, duplicate_pairs = find_duplicate_post_pairs(
         cluster_posts, common_phrase_allowlist=common_phrase_allowlist, embedder=embedder
@@ -157,9 +155,8 @@ def build_representative_content(
         if len(members) < 2:
             continue
         member_posts = [eligible[m] for m in members]
-        # Deterministic UUID (uuid5, not uuid4) so the same duplicate set produces
-        # the same group id across regenerations - the backend's schema requires a
-        # real uuid column here, not the truncated sha256 string this used to be.
+        # Deterministic UUID so the same duplicate set produces the same group id
+        # across regenerations.
         group_id = uuid.uuid5(uuid.NAMESPACE_OID, "|".join(sorted(p.id for p in member_posts)))
         canonical = min(member_posts, key=lambda p: p.created_at)
         canonical_post_ids.add(canonical.id)
@@ -262,10 +259,7 @@ def build_account_annex(
 
 
 def build_graph_snapshot(community: DetectedCommunity, edges: list[FusedEdge]) -> GraphSnapshot:
-    """Layout uses Fruchterman-Reingold (igraph's built-in layout('fr')) as a
-    force-directed substitute for ForceAtlas2 (10.5.6 point 5) - both serve the same
-    rendering purpose, and this avoids pulling in a second, less-maintained
-    graph-layout dependency just for cosmetic parity with the spec's named algorithm."""
+    """Force-directed layout via igraph's built-in Fruchterman-Reingold."""
     graph, member_edges = _member_subgraph(community, edges)
     layout = graph.layout("fr") if graph.vcount() else []
     coordinates = {

@@ -275,9 +275,9 @@ async def cluster_now(
 @router.post("/rescore", response_model=RescoreResponse)
 async def rescore(db: AsyncSession = Depends(get_db)) -> RescoreResponse:
     """Time-based NPR/Velocity/discount/final re-evaluation for every Existing claim.
-    F5's velocity-crossing trigger (PRD 10.5.8 point 2) is now the backend's decision -
-    it watches velocity_score itself (it reads this table directly) and calls
-    POST /coordination/detection-runs when a claim crosses the threshold."""
+    F5's velocity-crossing trigger is the backend's decision - it watches
+    velocity_score itself and calls POST /coordination/detection-runs when a claim
+    crosses the threshold."""
     count = await rescore_all_existing_claims(db)
     return RescoreResponse(claims_rescored=count)
 
@@ -423,7 +423,7 @@ async def add_alert(claim_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> 
 
 @router.delete("/{claim_id}/alert", response_model=ClaimListItemRead)
 async def remove_alert(claim_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> ClaimListItemRead:
-    """Bell icon "Remove" confirmation (US14)."""
+    """Bell icon "Remove" confirmation."""
     claim = await _fetch_claim_with_relations(db, claim_id)
     if claim is None:
         raise HTTPException(status_code=404, detail="Claim not found")

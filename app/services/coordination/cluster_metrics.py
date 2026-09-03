@@ -1,9 +1,6 @@
-"""PRD 10.5.5 - Stage 4: cluster-level metrics (SY/DU/CO/PR/AU) and the composite
-CoordinationScore. CO reuses DetectedCommunity's density/conductance from
-clustering.py directly. PR/AU sub-components aren't given explicit weights in the
-spec (unlike Harm Severity in Section 6), so each uses an unweighted mean of whatever
-sub-signals are actually available - the same "mean of available sub-signals" pattern
-already used for w_meta in signals/provenance.py, documented per component below."""
+"""Cluster-level metrics (SY/DU/CO/PR/AU) and the composite CoordinationScore. CO
+reuses DetectedCommunity's density/conductance directly. PR/AU each use an
+unweighted mean of whatever sub-signals are actually available."""
 
 import math
 from collections import defaultdict
@@ -34,13 +31,9 @@ class ClusterMetrics:
     pr: float
     au: float
     coordination_score: float
-    # The raw integer observation behind each normalised score (US50: "43 of 47
-    # accounts posted within the same 6-minute window", not just the score) -
-    # backend's coordinated_network.raw_counts_json. Built from whichever
-    # intermediate numerator/denominator each sub-metric already computes; not every
-    # component reduces to a single clean count (AU averages four per-account
-    # sub-signals), so this is a representative count per metric, not an exhaustive
-    # breakdown.
+    # Raw integer observation behind each normalised score, e.g. "43 of 47 accounts
+    # posted within the same 6-minute window" - not exhaustive for AU, which
+    # averages four per-account sub-signals.
     raw_counts: dict
 
 
@@ -156,9 +149,8 @@ def _age_percentile_inverted(
     now: datetime,
 ) -> float | None:
     """Inverted percentile of this cluster's median account age against a supplied
-    platform-wide baseline - younger-than-typical scores higher. Absent (not 0) when
-    no baseline is supplied: this service doesn't yet have a live platform-wide age
-    distribution to compare against, so the caller must provide one explicitly."""
+    platform-wide baseline - younger-than-typical scores higher. None if no baseline
+    is supplied."""
     if not platform_age_baseline_hours:
         return None
     ages = sorted(
@@ -246,10 +238,8 @@ def _reshare_ratio(posts: list[SignalPost]) -> float:
 def _automation_anomaly(
     member_ids: list[str], cluster_posts: list[SignalPost], window_hours: float
 ) -> tuple[float, int, int]:
-    """Returns (score, cluster_active_hours, 24) - the cluster's combined circadian
-    coverage (union of hours any member posted in) as AU's representative raw count.
-    AU itself averages four per-account sub-signals, which doesn't reduce to one
-    clean count the way SY/DU/PR's numerator/denominator do."""
+    """Returns (score, cluster_active_hours, 24), the cluster's combined circadian
+    coverage as AU's representative raw count."""
     posts_by_account: dict[str, list[SignalPost]] = defaultdict(list)
     for p in cluster_posts:
         posts_by_account[p.account_id].append(p)

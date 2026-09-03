@@ -10,9 +10,8 @@ class ContentAnalysisSchema(BaseModel):
     moral_foundation: MoralFoundation
     extracted_claim: str
     underlying_grievance: str
-    # PRD v1.5 6.6.1 - the content's own emotional valence, assessed independently
-    # of any claim. See Sentiment's docstring for why this must never be derived
-    # from stance.
+    # The content's own emotional valence, assessed independently of any claim.
+    # See Sentiment's docstring for why this must never be derived from stance.
     sentiment: Sentiment
     # English translation, used for embedding (English-only model) - echoes the
     # original text when it's already English.
@@ -63,8 +62,8 @@ class DebunkContentSchema(BaseModel):
 
 
 class DebunkSegmentSchema(BaseModel):
-    """One tailored Debunk Activity draft for a single audience segment (PRD v1.5
-    US12) - replaces the single generic DebunkContentSchema draft above."""
+    """One tailored Debunk Activity draft for a single audience segment - replaces
+    the single generic DebunkContentSchema draft above."""
 
     segment_name: str = Field(max_length=255)
     segment_rationale: str
@@ -73,8 +72,7 @@ class DebunkSegmentSchema(BaseModel):
 
 class DebunkSegmentBatchSchema(BaseModel):
     """Segments in most-exposed-first order - this order becomes each row's `rank`.
-    max_length=5 matches AP-21's documented range ceiling (ai.debunk_segment_max_count,
-    default 3) - the actual per-claim cap is enforced downstream in
+    The actual per-claim cap is enforced downstream in
     activity_service._generate_debunk_segments, not here."""
 
     segments: list[DebunkSegmentSchema] = Field(min_length=1, max_length=5)

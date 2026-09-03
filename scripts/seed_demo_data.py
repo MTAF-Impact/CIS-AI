@@ -201,7 +201,7 @@ DEMO_POSTS: list[tuple[str, ContentSource, str, str, float]] = [
     ),
 ]
 
-# (policy_title, policy_description, rolled_out_date) - exercises the D2 prediction pipeline.
+# (policy_title, policy_description, rolled_out_date)
 DEMO_POLICY_PREDICTIONS: list[tuple[str, str, date]] = [
     (
         "MRT Fase 2 Bundaran HI-Kota Extension",

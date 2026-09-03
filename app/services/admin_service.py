@@ -1,5 +1,5 @@
-"""F4 - Admin Setting Page: the global Over/Under Threshold config (US32) and the
-"Generate Generic Claim" MVP/demo utility (US33)."""
+"""Admin Setting Page: the global Over/Under Threshold config and the "Generate
+Generic Claim" demo utility."""
 
 import numpy as np
 from sqlalchemy import select
@@ -69,7 +69,7 @@ async def generate_demo_existing_claim(
     embedder: EmbeddingService,
     topic_hint: str | None = None,
 ) -> Claim:
-    """One-click sample Existing claim (US33) via the same construction pipeline HDBSCAN uses."""
+    """One-click sample Existing claim via the same construction pipeline HDBSCAN uses."""
     grounding_context = await build_grounding_context(db)
     posts = await llm.generate_synthetic_posts(DEMO_CLAIM_POST_COUNT, topic_hint, grounding_context)
 

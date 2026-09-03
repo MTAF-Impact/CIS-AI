@@ -1,13 +1,8 @@
-"""Live hazard grounding for the Harm (H) classifier (LLMClient.classify_harm) -
-Data Pipeline & Source Spec v1.0, D3 ("ground the judgment, don't just guess it").
+"""Live hazard grounding for the Harm (H) classifier. Scoped to BMKG only -
+PetaBencana and NASA FIRMS are follow-ups noted in docs/SOURCES.md.
 
-Scoped to BMKG only for tonight's build - PetaBencana's public API endpoint
-couldn't be confirmed in time and NASA FIRMS needs a separately-registered MAP_KEY;
-both are noted as follow-ups in docs/SOURCES.md rather than guessed at here.
-
-Free, no auth. Silently returns "" on any failure (unreachable, bad response, no
-configured codes) - a live external dependency must degrade, never raise, into the
-scoring path, same posture as fact_check_client.py.
+Free, no auth. Silently returns "" on any failure - a live external dependency
+must degrade, never raise, into the scoring path.
 """
 
 import httpx

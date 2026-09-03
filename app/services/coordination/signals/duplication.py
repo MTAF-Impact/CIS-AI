@@ -1,7 +1,6 @@
-"""PRD 10.5.2.2 - Signal 2: content duplication (w_text). Two sub-signals on
-normalised text: near-duplicate (MinHash/LSH) and semantic paraphrase (multilingual
-embeddings) - the latter catches machine-rewritten variants MinHash misses entirely,
-the dominant evasion pattern for LLM-assisted campaigns."""
+"""Signal: content duplication (w_text). Two sub-signals on normalised text:
+near-duplicate (MinHash/LSH) and semantic paraphrase (multilingual embeddings) -
+the latter catches machine-rewritten variants MinHash misses."""
 
 import re
 from collections import defaultdict
@@ -63,20 +62,13 @@ def find_duplicate_post_pairs(
     l_min: int = DEFAULT_L_MIN,
     embedder: MultilingualEmbeddingService | None = None,
 ) -> tuple[list[SignalPost], set[tuple[int, int]]]:
-    """Low-level primitive shared by compute_content_duplication (account-pair edge
-    weights, this module) and the DU cluster metric (10.5.5) - applies the required
-    exclusions, then flags post pairs as duplicates via MinHash/LSH (2a) or
-    multilingual semantic similarity (2b). Returns (eligible_posts, index_pairs) -
-    index_pairs are positions into eligible_posts, not the original posts list.
-
-    Note: common_phrase_allowlist (official slogans/hashtags/press-release lines) is
-    empty by default here - curating that list is a content task, not a code task,
-    same as the crawler's Phase 2 RSS/Telegram source curation."""
+    """Shared primitive: applies exclusions, then flags duplicate post pairs via
+    MinHash/LSH or multilingual semantic similarity. Returns (eligible_posts,
+    index_pairs), where index_pairs are positions into eligible_posts."""
     allowlist = common_phrase_allowlist or set()
     embedder = embedder or get_multilingual_embedding_service()
 
-    # Required exclusions (10.5.2.2): native reshares, posts shorter than L_min, and
-    # common-phrase-allowlisted text.
+    # Exclude native reshares, posts shorter than L_min, and allowlisted phrases.
     eligible: list[SignalPost] = []
     for p in posts:
         if p.is_native_reshare:

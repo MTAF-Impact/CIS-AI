@@ -133,9 +133,8 @@ async def _increment_topic_volume_bucket(
 async def _reach_inputs(
     db: AsyncSession, claim_id: uuid.UUID, window_days: int
 ) -> tuple[int, int, int, int]:
-    """Reach's inputs, scoped to a trailing window (AP-10) so the baseline follows the
-    recent past rather than the whole history of the deployment - a claim's Reach score
-    is about its current standing, not a lifetime-cumulative count."""
+    """Reach's inputs, scoped to a trailing window so the baseline follows the
+    recent past, not the whole deployment history."""
     window_start = datetime.now(UTC) - timedelta(days=window_days)
     stmt = select(
         func.coalesce(func.sum(ContentItem.impressions), 0),

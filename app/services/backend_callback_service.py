@@ -22,10 +22,9 @@ async def report_matchmaking_result(
     error: str | None = None,
     callback_url: str | None = None,
 ) -> None:
-    """Best-effort: a failed callback is logged, never raised - the backend's own retry
-    job covers this case. callback_url (from the Flow 1 request body) is preferred over
-    BACKEND_URL when present - it's what lets one AI deployment serve staging and
-    production without either side hardcoding the other's host."""
+    """Best-effort: a failed callback is logged, never raised - the backend's own
+    retry job covers this case. callback_url, when supplied, is preferred over
+    BACKEND_URL so one AI deployment can serve staging and production."""
     base = callback_url or settings.BACKEND_URL
     if not base:
         logger.warning(

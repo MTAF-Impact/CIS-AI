@@ -1,11 +1,8 @@
 """Dynamic scoring/matchmaking parameters, read from the backend-owned `cis_settings`
-table (documentation/CIS/AI_DYNAMIC_PARAMETER.md). This service is SELECT-only - it
-must never INSERT/UPDATE/DELETE that table. The only write path is
-Frontend -> Backend -> PUT /api/v1/settings/parameters -> cis_setting_history.
+table. This service is SELECT-only - it must never write that table.
 
-A missing row (or a missing table, e.g. before the backend has migrated/seeded it
-yet) is not an error - every key falls back to the documented default below, so
-behavior is unaffected until a value is actually written."""
+A missing row or table is not an error - every key falls back to the documented
+default below."""
 
 import logging
 import time
@@ -44,9 +41,8 @@ logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 30.0  # matches the backend's own SETTINGS_CACHE_TTL
 
-# PRD 6.2.4's bias guardrail - Policy Disruption may never weigh more than a quarter
-# of Harm. The backend enforces this on write; clamped here too in case a row ever
-# reaches this table some other way.
+# Policy Disruption may never weigh more than a quarter of Harm. The backend
+# enforces this on write; clamped here too as defense in depth.
 POLICY_DISRUPTION_WEIGHT_CEILING = 0.25
 
 DEFAULTS: dict[str, str] = {
@@ -64,18 +60,10 @@ DEFAULTS: dict[str, str] = {
     "scoring.reach_weight_content_count": str(DEFAULT_REACH_WEIGHTS.content_count),
     "scoring.reach_weight_platform_spread": str(DEFAULT_REACH_WEIGHTS.distinct_platforms),
     "scoring.reach_normalization_window_days": "90",
-    # velocity_interval_hours and npr_window_hours both default to "24" - matching
-    # today's single ROLLING_WINDOW_HOURS constant, NOT the AI_DYNAMIC_PARAMETER.md
-    # doc's own suggested defaults of 6/36. Diverging from 24 is an intentional
-    # follow-up (the doc's own suggested migration order, step 3), not something
-    # that should happen implicitly just because this table now exists.
     "scoring.velocity_interval_hours": "24",
     "scoring.npr_window_hours": "24",
     "scoring.velocity_zscore_min": str(DEFAULT_VELOCITY_ZSCORE_MIN),
     "scoring.velocity_zscore_max": str(DEFAULT_VELOCITY_ZSCORE_MAX),
-    # "1.0", not the doc's suggested "0.0001" - the doc itself flags 0.0001 as
-    # removing today's deliberate low-volume damping (decided with the user,
-    # 2026-09-03: keep the damping).
     "scoring.velocity_epsilon": str(DEFAULT_VELOCITY_EPSILON),
     "scoring.discount_gamma": str(_DEFAULT_GAMMA),
     "scoring.npr_reliability_minimum_posts": str(_DEFAULT_RELIABILITY_THRESHOLD),
@@ -91,11 +79,8 @@ DEFAULTS: dict[str, str] = {
 @dataclass(frozen=True)
 class RuntimeConfig:
     """One immutable snapshot of every AI-owned cis_settings value, already cast to
-    its real type. Read once at the start of a scoring/matchmaking pass (via
-    get_config) and threaded down explicitly from there - never re-read mid-pass, so
-    a settings edit mid-run can't produce a claim scored half one way and half the
-    other. Same principle F5 already applies by freezing its own parameters into
-    detection_run.parameters_json."""
+    its real type. Read once per pass and threaded down explicitly - never re-read
+    mid-pass, so a settings edit can't split one claim's scoring across two configs."""
 
     score_weights: ScoreWeights
     harm_weights: HarmWeights
@@ -141,10 +126,7 @@ def _build(raw: dict[str, str]) -> RuntimeConfig:
         + score_weights.emotional_intensity
     )
     if abs(weights_total - 1.0) > 1e-6:
-        # The backend's write path enforces sum==1.00; this should never fire. Logged
-        # rather than raised - a bad row here shouldn't take scoring down entirely,
-        # consistent with how the rest of this service degrades (e.g. raw_reach
-        # clamping negative inputs instead of raising).
+        # Logged rather than raised - a bad row here shouldn't take scoring down.
         logger.warning("cis_settings score weights sum to %.4f, not 1.00 - using them anyway", weights_total)
 
     harm_weights = HarmWeights(
@@ -192,11 +174,9 @@ async def load_config(db: AsyncSession) -> RuntimeConfig:
     """Always hits the DB - bypasses the cache. Most callers want get_config()
     instead; this is the cache's own refill path."""
     try:
-        # A SAVEPOINT (not a plain db.rollback()) - this session is very often
-        # mid-transaction with real, already-flushed-but-uncommitted work from the
-        # caller (e.g. a just-created Claim row). A bare rollback() on failure would
-        # discard that too, not just this SELECT - begin_nested() scopes the rollback
-        # to just this statement.
+        # SAVEPOINT, not a plain db.rollback(): the caller's session often has real
+        # uncommitted work already flushed (e.g. a just-created Claim), and a bare
+        # rollback() on failure would discard that too, not just this SELECT.
         async with db.begin_nested():
             rows = (await db.execute(text("SELECT key, value FROM cis_settings"))).all()
     except DBAPIError:
@@ -209,9 +189,8 @@ async def load_config(db: AsyncSession) -> RuntimeConfig:
 
 
 async def get_config(db: AsyncSession) -> RuntimeConfig:
-    """Cached with a 30s TTL (matches the backend's own SETTINGS_CACHE_TTL). Call this
-    once per request/background-task entry point and thread the RuntimeConfig it
-    returns down explicitly - see RuntimeConfig's docstring for why."""
+    """Cached with a 30s TTL. Call once per request/background-task entry point and
+    thread the result down explicitly."""
     global _cache, _cache_loaded_at
     now = time.monotonic()
     if _cache is None or (now - _cache_loaded_at) >= CACHE_TTL_SECONDS:

@@ -1,4 +1,4 @@
-"""Predicts Non-Existing claims for a policy (D2 / US42(b)) - never scored."""
+"""Predicts Non-Existing claims for a policy - never scored."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime

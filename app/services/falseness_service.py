@@ -1,13 +1,11 @@
 """Falseness (F) scoring - hard-thresholded pgvector match, never fabricates a value.
 
-Two independent paths, tried in order (Data Pipeline & Source Spec v1.0, D2's
-"second retrieval path" in a scope realistic for tonight - full NLI entailment
-against B2 authoritative documents is out of scope, this is a simpler live lookup):
+Two independent paths, tried in order:
 1. Cosine-similarity match against OfficialSource (seeded from TurnBackHoax.id via
    scripts/seed_debunk_corpus.py - a known-hoax corpus).
 2. If that doesn't clear threshold, a live Google Fact Check Tools API query on the
    claim's own text - skipped silently whenever settings.GOOGLE_API_KEY is unset
-   (see app/services/fact_check_client.py) or the API returns nothing usable."""
+   or the API returns nothing usable."""
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

@@ -1,7 +1,6 @@
-"""F2 AI matchmaking (US42): links a Policy to matching Existing claims, then predicts
-one new Non-Existing claim. Two triggers, both BackgroundTasks jobs:
-match_and_predict_claims_for_policy (our own POST /policies) and run_matchmaking_webhook
-(Go backend's Flow 1, see docs/GO_INTEGRATION.md)."""
+"""Links a Policy to matching Existing claims, then predicts one new Non-Existing
+claim. Two triggers, both BackgroundTasks jobs: match_and_predict_claims_for_policy
+(our own POST /policies) and run_matchmaking_webhook (the backend's Flow 1)."""
 
 import logging
 import uuid
@@ -128,15 +127,10 @@ async def match_and_predict_claims_for_policy(
 async def _fetch_and_extract(
     file_name: str | None, file_mime_type: str | None, document_url: str | None
 ) -> tuple[str | None, bytes | None]:
-    """Best-effort: a fetch failure loses both (nothing downloaded to keep); an
-    extraction failure keeps the downloaded file bytes and only drops the text -
-    the document still downloaded fine, so there's no reason to discard it too.
-    The extraction except is deliberately broad (not just UnsupportedDocumentTypeError):
-    pypdf can raise other errors for a real-world PDF - e.g. DependencyError when an
-    AES-encrypted PDF needs the `cryptography` package this run doesn't have - and
-    letting any of those propagate crashes the whole Flow 1 job before a Policy row
-    is even created, which looks indistinguishable from the request never arriving
-    at all (no row, no error, no callback)."""
+    """Best-effort: a fetch failure loses both; an extraction failure keeps the
+    downloaded bytes and only drops the text, since the document still downloaded
+    fine. The extraction except is broad on purpose - an uncaught extraction error
+    (e.g. an AES-encrypted PDF) would crash the job before the Policy row exists."""
     if not document_url:
         return None, None
 
@@ -183,13 +177,9 @@ async def run_matchmaking_webhook(
     session_factory: async_sessionmaker | None = None,
 ) -> None:
     """Flow 1 handler - creates a Policy for a backend-uploaded policy, runs matchmaking,
-    always reports back via Flow 2. Idempotent per backend_policy_id UNLESS force=True or
-    the previous run failed (Policy.last_matchmaking_error is set) - in either of those
-    cases this re-runs against the SAME policy row (ai_policy_id never changes) and
-    supersedes its prior claim_policies links and predicted claims rather than
-    duplicating them. See AI_REQUIREMENT_FOR_INTEGRATION_SUMMARY_V1.md B1/B2 - previously
-    ANY existing row short-circuited unconditionally, so a failed run could never recover
-    and force was never read at all."""
+    always reports back via Flow 2. Idempotent per backend_policy_id unless force=True
+    or the previous run failed, in which case it re-runs against the same policy row
+    and supersedes its prior claim_policies links and predicted claims."""
     llm = llm or get_llm_client()
     embedder = embedder or get_embedding_service()
     session_factory = session_factory or get_session_factory()

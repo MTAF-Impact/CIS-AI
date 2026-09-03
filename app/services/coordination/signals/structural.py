@@ -1,8 +1,5 @@
-"""PRD 10.5.2.5 - Signal 5: structural overlap (w_struct), optional. Frequently
-unavailable (needs follower/following data most ingestion sources don't expose). The
-fusion stage is responsible for redistributing this signal's weight proportionally
-across the remaining families when it's absent - this module just reports
-availability honestly via the None return."""
+"""Signal: structural overlap (w_struct), optional. Returns None when no follower
+data is available - fusion redistributes the weight."""
 
 import math
 from collections import defaultdict
@@ -13,9 +10,7 @@ from app.services.coordination.types import pair_key
 def compute_structural_overlap(
     follower_sets: dict[str, set[str]] | None,
 ) -> dict[tuple[str, str], float] | None:
-    """Adamic-Adar over follower sets, where the platform exposes them. Returns None
-    when no follower data is supplied at all - callers must treat that as "signal
-    unavailable" (record it in signals_unavailable), never as zero similarity."""
+    """Adamic-Adar over follower sets. None means unavailable, not zero similarity."""
     if not follower_sets:
         return None
 

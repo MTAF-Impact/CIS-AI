@@ -32,8 +32,8 @@ class ClaimListItemRead(BaseModel):
     first_caught_at: datetime
     positive_statement_count: int
     negative_statement_count: int
-    final_claim_score: float | None  # D1 only; always None on D2 (never scored)
-    is_alerted: bool  # bell icon state (US14) - D1 only; always False on D2 (F3 is EXISTING-only)
+    final_claim_score: float | None  # Existing only; always None on Non-Existing
+    is_alerted: bool  # bell icon state - Existing only; always False on Non-Existing
 
 
 class ClaimListEnvelope(BaseModel):
@@ -45,8 +45,7 @@ class ClaimListEnvelope(BaseModel):
 
 
 class TopAccountEntry(BaseModel):
-    """Top 5 accounts by post-volume on the Supporting side - PRD flags this
-    interpretation as unconfirmed; revisit if the PM says otherwise."""
+    """Top 5 accounts by post-volume on the Supporting side."""
 
     account_handle: str
     contribution_count: int

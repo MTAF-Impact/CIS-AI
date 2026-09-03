@@ -1,9 +1,6 @@
-"""F5 (PRD Section 10) request/response schemas for the AI service's two F5
-endpoints - POST /api/v1/detection/runs and POST /api/v1/detection/snapshots/purge.
-Field names mirror the backend's actual reference contract verbatim
-(CIS-Backend internal/aiclient/detection.go DetectionRunRequest,
-internal/models/f5_detector_settings.go CISDetectorSettings) - not a guess, pulled
-and reviewed from their merged code this session. See docs/COORDINATION.md."""
+"""Request/response schemas for the AI service's two F5 endpoints -
+POST /api/v1/detection/runs and POST /api/v1/detection/snapshots/purge. Field
+names mirror the backend's reference contract verbatim."""
 
 import uuid
 from datetime import datetime
@@ -13,12 +10,8 @@ from pydantic import BaseModel, Field
 
 
 class DetectorParameters(BaseModel):
-    """The full detector configuration in force for this run - PRD 10.11's ~19
-    tunables plus confidence-band cutoffs and the multi-signal rule's family count,
-    all backend-configurable now (F4 config lives entirely on their side). Sent in
-    full on every request - no partial-override concept; the backend's own
-    CISDetectorSettings.Validate() guarantees a complete, cross-field-valid object
-    before it's ever sent."""
+    """The full detector configuration in force for this run, sent in full on every
+    request - no partial-override concept."""
 
     window_days: int
     bin_width_seconds: int
@@ -52,8 +45,8 @@ class DetectorParameters(BaseModel):
 
 
 class ExclusionAccount(BaseModel):
-    """One declared-legitimate account (US56/US63) - the backend's allowlist,
-    travelling with the request rather than read from a shared table."""
+    """One declared-legitimate account from the backend's allowlist, travelling
+    with the request rather than read from a shared table."""
 
     platform: str
     platform_account_id: str
@@ -62,9 +55,7 @@ class ExclusionAccount(BaseModel):
 
 class Exclusions(BaseModel):
     """The declared-coordination allowlist and the common-phrase list - both
-    backend-owned, pipeline-read. This is the one place the read direction between
-    the two services reverses, and it travels with the request rather than being a
-    table this service reads directly."""
+    backend-owned, travelling with the request rather than read from a table."""
 
     accounts: list[ExclusionAccount] = Field(default_factory=list)
     phrases: list[str] = Field(default_factory=list)
@@ -72,8 +63,7 @@ class Exclusions(BaseModel):
 
 class DetectionRunRequest(BaseModel):
     """POST /api/v1/detection/runs. The backend computes window_start/window_end
-    itself (enforces PRD 10.5.1's 50%-overlap rule via its own cross-field
-    validation) and already rejects Non-Existing/Synthetic claim_ids with 422 before
+    itself and already rejects Non-Existing/Synthetic claim_ids with 422 before
     calling us."""
 
     claim_ids: list[uuid.UUID] = Field(min_length=1)

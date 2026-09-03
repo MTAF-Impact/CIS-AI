@@ -24,8 +24,8 @@ async def generate_and_cache_debunk_activity(
     config: RuntimeConfig | None = None,
 ) -> None:
     """Debunk Activity for an Existing claim - the Truth Sandwich, once only. Also
-    generates the per-audience-segment drafts (PRD v1.5 US12) from the same
-    Supporting-side sample, cached the same way and guarded by the same early return."""
+    generates the per-audience-segment drafts from the same Supporting-side sample,
+    cached the same way and guarded by the same early return."""
     if claim.activity_content is not None:
         return
 
@@ -63,8 +63,8 @@ async def _generate_debunk_segments(
     supporting_texts: list[str] | None,
     max_count: int,
 ) -> None:
-    """PRD v1.5 US12. Failure here never blocks the generic draft above, which the
-    backend documents as the fallback the FE renders when this table is empty."""
+    """Failure here never blocks the generic draft above, which the frontend
+    renders as the fallback when this table is empty."""
     sample = supporting_texts or [claim.claim_statement]
     try:
         segments = await llm.generate_debunk_segments(
@@ -74,16 +74,10 @@ async def _generate_debunk_segments(
         logger.exception("Debunk segmentation failed; falling back to the single generic draft")
         return
 
-    # Dedupe on segment_name before insert: `claim_debunk_segments` has a
-    # UNIQUE(claim_id, segment_name) constraint, and the prompt's "distinct
-    # segments" instruction is not a hard guarantee. Without this, a repeated
-    # name from a single LLM response would only surface as an IntegrityError at
-    # the caller's eventual commit - which, from cluster_unclustered_content's
-    # Pass 2, is one transaction shared by every claim created in that run. A
-    # naming collision on one claim's segments would then roll back all of them.
-    # Dedupe BEFORE capping to max_count (AP-21, ai.debunk_segment_max_count) so a
-    # dropped duplicate doesn't itself eat into the cap - the prompt already orders
-    # segments most-exposed-first, so slicing after dedup keeps that ordering intact.
+    # Dedupe on segment_name before insert: claim_debunk_segments has a
+    # UNIQUE(claim_id, segment_name) constraint and the LLM doesn't always return
+    # distinct names. Dedupe before capping to max_count so a dropped duplicate
+    # doesn't itself eat into the cap.
     seen_names: set[str] = set()
     deduped = []
     for segment in segments:
