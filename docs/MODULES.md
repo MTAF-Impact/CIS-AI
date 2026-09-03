@@ -35,7 +35,7 @@ Pydantic schema in `app/schemas/analysis.py`):
 | `classify_stances_batch(claim_statement, texts)` | Batched stance for a whole new cluster in one call. Raises `StanceCountMismatchError` if the model returns a different count than given — the caller must not silently zip a misaligned result. | `clustering_service` Pass 2 (new claim), falls back to per-item `classify_stance` on failure |
 | `classify_harm(claim_statement, sample_supporting_texts, hazard_context="")` | The 4 Harm sub-scores, against the detailed 5-band rubric (see `SCORING.md`). `hazard_context` is an optional live-grounding block (active BMKG forecasts — `hazard_context_service.fetch_bmkg_context`, see `docs/SOURCES.md`), omitted from the prompt entirely when empty. | `clustering_service.build_claim_from_content_items` |
 | `generate_debunk(claim_statement, grounding_context)` | The Truth Sandwich (`core_fact`/`nuanced_flag`/`reiterated_fact`). | `activity_service.generate_and_cache_debunk_activity` |
-| `generate_debunk_segments(claim_statement, grounding_context, sample_texts)` | PRD v1.5 US12: 1-4 audience segments (`segment_name`/`segment_rationale`/`content`), inferred from a Supporting-side sample, most-exposed first. | `activity_service._generate_debunk_segments` |
+| `generate_debunk_segments(claim_statement, grounding_context, sample_texts)` | PRD v1.5 US12: 1-5 audience segments (`segment_name`/`segment_rationale`/`content`), inferred from a Supporting-side sample, most-exposed first - capped downstream to `ai.debunk_segment_max_count` (defaults to 3, AP-21). | `activity_service._generate_debunk_segments` |
 | `predict_non_existing_claim(policy_title, policy_description, grounding_context)` | Predicted claim statement, topic, attack angle, framing, and the Prebunk explainer. | `claim_prediction_service.predict_non_existing_claim` |
 | `generate_synthetic_posts(count, topic_hint, grounding_context)` | Fabricates realistic Jakarta posts (prototype crawler stand-in). | `ingestion.py`'s `/ingest/generate-synthetic`, `admin_service.generate_demo_existing_claim` |
 | `confirm_policy_claim_matches(policy_title, policy_description, candidate_claim_statements)` | One boolean per candidate claim — is it genuinely about this policy? Raises `ValueError` on a count mismatch. | `policy_matchmaking_service._run` |
@@ -82,22 +82,52 @@ button:
 
 ---
 
+## `app/services/config_service.py`
+
+Dynamic scoring/matchmaking parameters, read `SELECT`-only from the backend-owned
+`cis_settings` table — see `documentation/CIS/AI_DYNAMIC_PARAMETER.md` for the full
+catalog and `SCORING.md`'s "Dynamic parameters" section for how each one is used.
+
+- `RuntimeConfig` — frozen dataclass, one immutable snapshot of every value already
+  cast to its real type (`ScoreWeights`, `HarmWeights`, `ReachWeights` from
+  `scoring_engine.py`, plus the velocity/NPR/falseness/clustering/matchmaking scalars).
+- `DEFAULTS: dict[str, str]` — every key's documented default, built from the same
+  constants `scoring_engine.py`/`falseness_service.py` expose, so there is exactly one
+  place each default is written down.
+- `DEFAULT_CONFIG` — `RuntimeConfig` built from an empty row set; what every caller gets
+  before `cis_settings` has any data, or if it's unreachable.
+- `load_config(db) -> RuntimeConfig` — always hits the DB; catches `DBAPIError` (e.g. the
+  table doesn't exist yet) and returns `DEFAULT_CONFIG` instead of raising, rolling back
+  the session first so the caller's next query isn't stuck in an aborted transaction.
+- `get_config(db) -> RuntimeConfig` — 30s-TTL process-global cache around `load_config`
+  (matches the backend's own `SETTINGS_CACHE_TTL`). This is what callers actually use.
+- Clamps `HarmWeights.policy_disruption` to `POLICY_DISRUPTION_WEIGHT_CEILING` (`0.25`)
+  regardless of what the table holds — PRD §6.2.4's bias guardrail, enforced here as a
+  second layer even though the backend's write path already enforces it.
+- Logs (never raises) if the five `ScoreWeights` don't sum to `1.00` — the backend's
+  write path guarantees this; a bad row shouldn't take scoring down.
+
+---
+
 ## `app/services/clustering_service.py`
 
 **The core pipeline.** Two-pass clustering, dynamic topic assignment, stance
 classification, and the full R/V/F/H/EI/NPR scoring orchestration for every claim
 touched.
 
-### `cluster_unclustered_content(db, llm=None, embedder=None) -> ClusterResult`
+### `cluster_unclustered_content(db, llm=None, embedder=None, config=None) -> ClusterResult`
 
 The entry point. Queries every `content_item` with `claim_id IS NULL AND embedding IS
-NOT NULL`. If none, no-ops (`ClusterResult(0, 0, 0)`).
+NOT NULL`. If none, no-ops (`ClusterResult(0, 0, 0)`). `config` follows the same
+auto-default pattern as `embedder` (not `llm`'s no-default rule) — see
+`ARCHITECTURE.md` and `config_service.py`'s module docstring.
 
 **Pass 1 — attach to existing claims:** for each unclustered item, cosine-compare
 against every `existing` claim's embedding; if the best match is ≥
-`CLAIM_ATTACH_THRESHOLD` (0.55), attach it (`item.claim_id = claim.id`) and classify its
-stance via an **explicit LLM call** (never defaulted — see `ARCHITECTURE.md`). If the
-stance is `supporting`, increments that hour's `topic_volume_buckets` row.
+`config.claim_attach_threshold` (`cis_settings` key `clustering.claim_attach_threshold`,
+defaults to `0.55`), attach it (`item.claim_id = claim.id`) and classify its stance via
+an **explicit LLM call** (never defaulted — see `ARCHITECTURE.md`). If the stance is
+`supporting`, increments that hour's `topic_volume_buckets` row.
 
 **Pass 2 — HDBSCAN the remainder:** whatever's left (label `-1` = noise stays
 unclustered) is clustered via HDBSCAN (`MIN_CLUSTER_SIZE = 2`), and each formed cluster
@@ -108,7 +138,7 @@ Reach across every claim in that topic (a sibling's Reach change makes its own c
 score stale too), and every claim returned from that renormalization gets a full
 `rescore_claim` pass.
 
-### `build_claim_from_content_items(db, cluster_items, llm, embedder) -> Claim`
+### `build_claim_from_content_items(db, cluster_items, llm, embedder, config=None) -> Claim`
 
 **Public and reused** by both Pass 2 above and `admin_service.generate_demo_existing_claim`
 (the F4/Flow-3 demo-claim generator) — deliberately the *same* function, so a
@@ -125,29 +155,36 @@ Supporting-stance items → AI-classify Harm (`classify_harm`) and compute `harm
 — that happens in the caller (`cluster_unclustered_content`'s renormalize+rescore step,
 or `admin_service`'s own explicit renormalize+rescore call).
 
-### `assign_or_create_topic(db, claim_embedding, candidate_label) -> Topic`
+### `assign_or_create_topic(db, claim_embedding, candidate_label, topic_attach_threshold=0.5) -> Topic`
 
 Dynamic topic assignment, identical for both claim types. Cosine-compares the new
 claim's embedding against every topic's centroid embedding; if the best match ≥
-`TOPIC_ATTACH_THRESHOLD` (0.5), attaches and **recomputes that topic's centroid** as the
-mean of every sibling claim's embedding plus this one (`_centroid`, L2-normalized).
-Otherwise creates a new `Topic` with `embedding = claim_embedding` (a single-claim topic
-is its own centroid).
+`topic_attach_threshold` (`cis_settings` key `clustering.topic_attach_threshold`,
+callers thread `config.topic_attach_threshold` through), attaches and **recomputes
+that topic's centroid** as the mean of every sibling claim's embedding plus this one
+(`_centroid`, L2-normalized). Otherwise creates a new `Topic` with
+`embedding = claim_embedding` (a single-claim topic is its own centroid).
 
-### `renormalize_topic_reach(db, topic_id) -> list[Claim]`
+### `renormalize_topic_reach(db, topic_id, config=None) -> list[Claim]`
 
 Recomputes raw Reach (`scoring_engine.raw_reach`) for every `existing` claim in a topic
 from its current Supporting-side `content_items` aggregates, then min-max normalizes the
 whole set together (`scoring_engine.normalize_minmax_per_topic`) and writes
 `claim.reach_score`. Returns the touched claims so the caller can also rescore them.
 
-### `rescore_claim(db, claim) -> None`
+### `rescore_claim(db, claim, config=None) -> None`
 
-Computes Velocity (24h-window volume delta, z-scored against the topic's baseline from
+Computes Velocity (window-based volume delta, z-scored against the topic's baseline from
 `topic_volume_buckets`), Falseness (`falseness_service.compute_falseness_score`), NPR +
 dormancy + discount factor (Supporting/Opposing volume counts in the rolling window),
 `claim_score`, `final_claim_score` — writes all of them, and appends a
 `ClaimScoreSnapshot` row.
+
+**`config` on every function above**: `RuntimeConfig | None = None`, auto-resolved via
+`config_service.get_config(db)` when omitted (same auto-default pattern as `embedder`,
+not `llm`'s no-default rule — see `ARCHITECTURE.md`). Callers that already have a
+snapshot (e.g. `cluster_unclustered_content` looping over Pass 1/Pass 2) thread it down
+explicitly so one pass never reads two different settings mid-run.
 
 ### `rescore_all_existing_claims(db) -> int`
 
@@ -167,20 +204,28 @@ this exists and why `llm`/`embedder` must be passed explicitly by the caller.
 ## `app/services/scoring_engine.py`
 
 Pure functions, zero I/O, fully unit-tested — see `SCORING.md` for the formulas
-themselves and the exact constants (`WEIGHT_R`, `GAMMA`, `RELIABILITY_THRESHOLD`, etc.).
+themselves. Every weight/threshold is now a function parameter with a documented
+default (`ScoreWeights`, `HarmWeights`, `ReachWeights`, `GAMMA`, `RELIABILITY_THRESHOLD`,
+`DEFAULT_VELOCITY_EPSILON`, `DEFAULT_VELOCITY_ZSCORE_MIN/MAX`) — callers thread the real
+value through from `config_service.RuntimeConfig` (`app/services/config_service.py`,
+`documentation/CIS/AI_DYNAMIC_PARAMETER.md`) rather than this file holding one true
+value baked in.
 
 ---
 
 ## `app/services/falseness_service.py`
 
-`compute_falseness_score(db, claim_embedding, claim_statement=None, threshold=0.55) ->
-float | None` — two paths, tried in order, never fabricated:
+`compute_falseness_score(db, claim_embedding, claim_statement=None, threshold=0.55,
+live_match_score=75.0) -> float | None` — two paths, tried in order, never fabricated:
 1. Top-1 pgvector cosine-similarity match against `official_sources` (seeded by
    `scripts/seed_debunk_corpus.py` — see `docs/SOURCES.md`).
 2. If that misses and `claim_statement` is given, a live `fact_check_client` lookup —
    any matching Google Fact Check Tools API result with a false-reading
-   `textualRating` scores a fixed `LIVE_FACT_CHECK_MATCH_SCORE` (75.0), since it's a
-   real verified verdict, not a modelled similarity.
+   `textualRating` scores a fixed `live_match_score`, since it's a real verified
+   verdict, not a modelled similarity.
+
+Both defaults are overridden by `config.falseness_match_threshold`/
+`falseness_live_match_score` at the one real call site (`clustering_service.rescore_claim`).
 
 Deliberately a **separate module** from `rag_service.py`: RAG grounding (below) is
 soft/best-effort context for LLM prompts; this is hard-thresholded and must never
@@ -237,8 +282,8 @@ controls the transaction boundary.
 
 ## `app/services/activity_service.py`
 
-`generate_and_cache_debunk_activity(db, claim, llm, embedder, supporting_texts=None)` —
-**Existing** claims' Debunk Activity. Idempotent guard (`if claim.activity_content is not
+`generate_and_cache_debunk_activity(db, claim, llm, embedder, supporting_texts=None,
+config=None)` — **Existing** claims' Debunk Activity. Idempotent guard (`if claim.activity_content is not
 None: return`) — never regenerates. Retrieves fault-line grounding for
 `claim.claim_statement`, calls `llm.generate_debunk`, writes the concatenated
 `activity_content` **and** the 3 split Truth Sandwich fields
@@ -252,7 +297,12 @@ Also generates the PRD v1.5 `claim_debunk_segments` (US12), via the private
 (the claim's Supporting-side sample) is what the LLM infers audience segments from,
 falling back to `[claim.claim_statement]` when not given. Dedupes the LLM's response on
 `segment_name` before inserting (the table has `UNIQUE(claim_id, segment_name)`; a
-repeated name is a prompt-level near-miss, not something to trust as a hard guarantee).
+repeated name is a prompt-level near-miss, not something to trust as a hard guarantee),
+**then** caps the deduped, most-exposed-first list to `config.debunk_segment_max_count`
+(`ai.debunk_segment_max_count`, defaults to `3`, AP-21) — dedupe-then-cap, not the other
+order, so a dropped duplicate never itself eats into the cap. The same cap applies to the
+F4 "Generate Generic Claim" demo path for free, since `admin_service.generate_demo_existing_claim`
+goes through this same function via `build_claim_from_content_items`.
 Failure here is independent of the generic draft above — it's caught separately and never
 un-sets `activity_content`, matching the backend's documented fallback (empty segment
 table → render the generic draft, exactly as PRD v1.4).
@@ -270,8 +320,9 @@ The F2 AI matchmaking pipeline (US42) — see `GO_INTEGRATION.md` for the full c
 this implements from the Go-backend-facing side.
 
 - `_run(db, policy, llm, embedder) -> tuple[int, int]` — embeds the policy, cosine-
-  prefilters existing claims (`CLAIM_MATCH_PREFILTER_THRESHOLD = 0.35`, top 20
-  candidates, `MAX_MATCH_CANDIDATES`), sends the survivors to
+  prefilters existing claims (`config.claim_prefilter_threshold`, `cis_settings` key
+  `matchmaking.claim_prefilter_threshold`, defaults to `0.35`; top 20 candidates,
+  `MAX_MATCH_CANDIDATES`), sends the survivors to
   `llm.confirm_policy_claim_matches` in one batched call, creates `ClaimPolicy` rows for
   confirmed matches, then calls `predict_non_existing_claim` (passing the matched
   claims' statements so the prediction avoids duplicating already-covered ground).

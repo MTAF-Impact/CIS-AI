@@ -8,6 +8,31 @@ except Falseness (F), which needs a database round-trip and lives separately in
 **Applies to Existing/Generic claims only.** Non-Existing/Synthetic claims are never
 scored — every score column stays `NULL` on those rows, by design (see `DATA_MODEL.md`).
 
+## Dynamic parameters (`cis_settings`)
+
+Every weight and threshold named in this doc is a **default**, not a hardcoded
+constant — the real value is read from the backend-owned `cis_settings` table at
+runtime, cached 30s, snapshotted once per scoring pass via
+`app/services/config_service.RuntimeConfig` (see
+`documentation/CIS/AI_DYNAMIC_PARAMETER.md` for the full parameter catalog and the
+ownership/write-path rules — this service is `SELECT`-only). A missing row (or a
+missing table, e.g. before the backend has deployed it) is not an error: every value
+falls back to the constant documented here.
+
+Two defaults were deliberately chosen to diverge from that doc's own suggested
+values (decided with the user, 2026-09-03):
+- **`scoring.velocity_epsilon` defaults to `1.0`, not `0.0001`.** `0.0001` removes
+  today's deliberate low-volume damping — see V's formula below.
+- **`scoring.velocity_interval_hours` and `scoring.npr_window_hours` both default to
+  `24`**, matching today's single window, not the doc's suggested `6`/`36` split.
+  Diverging from `24` is an intentional follow-up, not something that should happen
+  implicitly just because this table now exists.
+
+**Every parameter in the catalog is now wired**, including the two the first pass
+deferred: the Reach normalization window (`scoring.reach_normalization_window_days`,
+AP-10 — a real time filter in `clustering_service._reach_inputs`, see R below) and the
+debunk-segment cap (`ai.debunk_segment_max_count`, AP-21 — see `activity_service.py`).
+
 ## Design principle
 
 Every formula must be explainable in plain terms to a non-technical policy reviewer, and
@@ -49,14 +74,21 @@ R_raw = w1·log(1+Impressions) + w2·log(1+UniqueAuthors)
 R = min-max normalize R_raw to [0, 100], scoped per-topic
 ```
 
-- `Impressions` — `SUM(content_items.impressions)` across the claim's Supporting posts.
-- `UniqueAuthors` — `COUNT(DISTINCT content_items.author_id)`, Supporting posts.
-- `ContentCount` — `COUNT(*)`, Supporting posts.
-- `DistinctPlatforms` — `COUNT(DISTINCT content_items.source)`, Supporting posts;
-  `TotalMonitoredPlatforms = 5` (`len(ContentSource)`).
-- `w1=w2=w3=w4=0.25` (`ReachWeights`, currently equal-weighted placeholders — the PRD
-  leaves per-component weighting unspecified; tune `DEFAULT_REACH_WEIGHTS` in
-  `scoring_engine.py` if given real values).
+- All three below are scoped to a trailing window (`scoring.reach_normalization_window_days`,
+  defaults to `90` days, AP-10) — `content_items.created_at >= now - window`. A claim's
+  Reach is about its current standing, not a lifetime-cumulative count; without this a
+  claim from months ago with a lot of old volume could keep outranking one currently
+  spreading fast.
+- `Impressions` — `SUM(content_items.impressions)` across the claim's Supporting posts
+  in that window.
+- `UniqueAuthors` — `COUNT(DISTINCT content_items.author_id)`, Supporting posts in window.
+- `ContentCount` — `COUNT(*)`, Supporting posts in window.
+- `DistinctPlatforms` — `COUNT(DISTINCT content_items.source)`, Supporting posts in
+  window; `TotalMonitoredPlatforms = 5` (`len(ContentSource)`).
+- `w1=w2=w3=w4=0.25` by default (`scoring.reach_weight_*` in `cis_settings`,
+  `ReachWeights` in code — equal-weighted placeholders; the PRD leaves per-component
+  weighting unspecified, these are **not** sum-constrained since min-max
+  normalization afterwards makes the absolute scale irrelevant).
 - `log(1+x)` — prevents one viral outlier from dominating.
 - **Normalization is scoped per-topic**, not globally: every Existing claim's raw R
   within the same topic is min-max scaled together (`normalize_minmax_per_topic`). A
@@ -72,19 +104,24 @@ R = min-max normalize R_raw to [0, 100], scoped per-topic
 ```
 V_raw = (Volume_t - Volume_t-Δ) / (Volume_t-Δ + ε)
 V_zscore = (V_raw - baseline_mean) / baseline_std      # topic's historical baseline
-V = 100 × sigmoid(V_zscore)                            # squashed to [0, 100]
+V = min-max map clamp(V_zscore, z_min, z_max) onto [0, 100]
 ```
 
-- `Volume_t` / `Volume_t-Δ` — Supporting-post counts in the current vs. previous 24h
-  window (`ROLLING_WINDOW_HOURS = 24.0`), per-claim.
-- `ε = 1.0` — prevents division-by-zero for a brand-new claim.
+- `Volume_t` / `Volume_t-Δ` — Supporting-post counts in the current vs. previous
+  window (`scoring.velocity_interval_hours`, defaults to `24`), per-claim.
+- `ε` (`scoring.velocity_epsilon`, defaults to `1.0`) — deliberate low-volume damping,
+  not a bare division-by-zero guard: going from 0→5 posts reads as `5/1`, not `5/ε≈0`.
 - Baseline mean/std comes from `topic_volume_buckets` (hourly Supporting-volume history
   per topic) — bucket-over-bucket deltas, at least 3 buckets required or the baseline
-  defaults to `(0, 0)`, which the sigmoid squash then neutrally maps to `50`
-  ("no baseline yet" cold-start).
-- Squashed via a numerically-stable logistic sigmoid (branches on the sign of `z` to
-  avoid overflow on large negative inputs — `z=0 → 50`, unbounded `z` approaches `0` or
-  `100`).
+  defaults to `(0, 0)`, which then maps to `V_zscore = 0` ("no baseline yet"
+  cold-start).
+- `z_min`/`z_max` (`scoring.velocity_zscore_min`/`_max`, default `-3`/`3`) — `V_zscore`
+  is **clamped** to this range, then linearly mapped onto `[0, 100]` (PRD §6.2.2's
+  min-max form, chosen over a sigmoid squash: an admin-configured `z_min`/`z_max`
+  should mean exactly what it says — `z_min` maps to `0`, `z_max` maps to `100` — not
+  an asymptote the score approaches but never reaches). With the symmetric default
+  range, `z=0 → 50`; a `z_zscore` outside `[z_min, z_max]` saturates at `0`/`100`
+  rather than continuing to grow.
 
 ### F — Falseness Confidence
 
@@ -98,15 +135,15 @@ Two paths, tried in order (`app/services/falseness_service.py`):
 
 1. `SimilarityToKnownDebunk` — top cosine-similarity match between the claim's own
    embedding and every `official_sources.embedding` (pgvector `cosine_distance`,
-   `similarity = 1 - distance`), threshold `0.55` (`DEFAULT_MATCH_THRESHOLD`).
-   `official_sources` is seeded from TurnBackHoax.id's public feed
-   (`scripts/seed_debunk_corpus.py`, safe to re-run periodically) — see `DATA_MODEL.md`
-   and `docs/SOURCES.md`.
+   `similarity = 1 - distance`), threshold `0.55` by default
+   (`scoring.falseness_match_threshold`). `official_sources` is seeded from
+   TurnBackHoax.id's public feed (`scripts/seed_debunk_corpus.py`, safe to re-run
+   periodically) — see `DATA_MODEL.md` and `docs/SOURCES.md`.
 2. If that misses, a live Google Fact Check Tools API lookup on the claim's own text
    (`app/services/fact_check_client.py`) — any matching `ClaimReview` with a
-   false-reading `textualRating` scores a fixed `LIVE_FACT_CHECK_MATCH_SCORE` (75.0),
-   since it's a real verified verdict rather than a modelled similarity. Silently
-   skipped whenever `GOOGLE_API_KEY` is unset.
+   false-reading `textualRating` scores a fixed `75.0` by default
+   (`scoring.falseness_live_match_score`), since it's a real verified verdict rather
+   than a modelled similarity. Silently skipped whenever `GOOGLE_API_KEY` is unset.
 - If neither path finds anything, **F is `NULL`, never `0`.** `0` would wrongly assert
   "confirmed true"; `NULL` means "no signal either way," which is handled explicitly in
   the composite formula below.
@@ -118,6 +155,11 @@ Two paths, tried in order (`app/services/falseness_service.py`):
 ```
 H = 0.35·PublicSafety + 0.30·InstitutionalTrust + 0.20·Economic + 0.15·PolicyDisruption
 ```
+
+Weights above are the defaults (`scoring.harm_weight_*`). `PolicyDisruption` carries a
+hard ceiling of `0.25`, clamped on read regardless of what the table holds — PRD
+§6.2.4's bias guardrail against scoring policy criticism itself as harm (the backend
+also enforces this on write; this is a second layer, not a replacement).
 
 Each sub-score is AI-classified (`LLMClient.classify_harm`) against a detailed 5-band
 rubric (0–20 / 21–40 / 41–60 / 61–80 / 81–100, each with concrete example scenarios —
@@ -158,17 +200,20 @@ EI = (0.5 × OutrageWordDensity + 0.5 × NegativeReactionRatio) × 100
 ClaimScore = 0.15·R + 0.15·V + 0.30·F + 0.30·H + 0.10·EI
 ```
 
-Weight rationale: F and H carry the highest combined weight (0.60) — this is a
-risk-triage tool, not a virality tracker. R+V (0.30 combined) capture urgency of spread.
-EI (0.10) is weighted lowest.
+Weights above are the defaults (`scoring.weight_*`, sum-constrained to `1.00` on the
+backend's write path). Weight rationale: F and H carry the highest combined weight
+(0.60) — this is a risk-triage tool, not a virality tracker. R+V (0.30 combined)
+capture urgency of spread. EI (0.10) is weighted lowest.
 
 **If F is `NULL`** (neither the corpus match nor the live Fact Check API fallback finds
-anything — still common for a novel claim with no prior fact-check): F's 0.30 weight is
-**dropped and the remaining weights renormalize** to sum to 1.0 —
+anything — still common for a novel claim with no prior fact-check): F's weight is
+**dropped and the remaining weights renormalize** over `1 - weight_falseness` —
 ```
 ClaimScore = (0.15·R + 0.15·V + 0.30·H + 0.10·EI) / 0.70
 ```
 — rather than treating missing F as `0`, which would wrongly assert "confirmed true".
+This renormalization follows whatever `weight_falseness` actually is at read time, not
+a hardcoded `0.70`.
 
 Bounded `[0, 100]` by construction (weights sum to 1.0, every input is already `[0,100]`);
 `scoring_engine.claim_score()` still clamps as a safety net.
@@ -181,22 +226,27 @@ Bounded `[0, 100]` by construction (weights sum to 1.0, every input is already `
 score accordingly, without ever erasing it.*
 
 ```
-NPR = OpposingVolume / (SupportingVolume + OpposingVolume)     # rolling 24h window
-DiscountFactor = 1 - (γ × NPR)                                  # γ = 0.5
+NPR = OpposingVolume / (SupportingVolume + OpposingVolume)     # rolling window
+DiscountFactor = 1 - (γ × NPR)                                  # γ defaults to 0.5
 FinalClaimScore = ClaimScore × DiscountFactor
 ```
 
-- `γ = 0.5` (`GAMMA`) — even total pushback (`NPR = 1`) reduces the score by at most 50%.
-- `DiscountFactor` bounded `[0.5, 1]`; since `ClaimScore ∈ [0,100]`, `FinalClaimScore` is
+- Window defaults to `24h` (`scoring.npr_window_hours`) — same default as V's interval
+  today, though they're two independent settings now (diverging them, per the doc's
+  suggested `36h` for NPR, is an intentional follow-up).
+- `γ` (`scoring.discount_gamma`, defaults to `0.5`) — even total pushback (`NPR = 1`)
+  reduces the score by at most `1 - γ`.
+- `DiscountFactor` bounded `[1-γ, 1]`; since `ClaimScore ∈ [0,100]`, `FinalClaimScore` is
   guaranteed `[0,100]`.
 - **Edge case — dormant:** if Supporting + Opposing volume is `0` in the window, `NPR` is
   **not computed** (`NULL`) and the claim is flagged `is_dormant: true` instead of being
   discounted. A dormant claim's `discount_factor` reads `1.0` (no discount) — dormancy
-  must be *flagged*, never silently discounted.
+  must be *flagged*, never silently discounted. This rule is **not configurable** — it's
+  a correctness rule about missing data, not a tuning knob.
 - **Edge case — reliability threshold:** if total volume (Supporting+Opposing) is below
-  `RELIABILITY_THRESHOLD = 25` posts (midpoint of the PRD's recommended 20–30 range),
-  `DiscountFactor` defaults to `1.0` regardless of `NPR` — too little data to trust the
-  pushback signal.
+  `scoring.npr_reliability_minimum_posts` (defaults to `25`, midpoint of the PRD's
+  recommended 20–30 range), `DiscountFactor` defaults to `1.0` regardless of `NPR` — too
+  little data to trust the pushback signal.
 
 ---
 

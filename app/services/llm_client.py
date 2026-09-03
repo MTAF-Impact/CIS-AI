@@ -253,12 +253,12 @@ Given the claim being debunked, grounded reference/policy context, and a sample 
 actual posts spreading it (used only to infer who is engaging - never quote them back \
 verbatim), do the following:
 
-1. Identify 1-4 distinct audience segments most exposed to or affected by this claim, \
+1. Identify 1-5 distinct audience segments most exposed to or affected by this claim, \
    inferred from the demographic, interest, or community pattern visible across the \
    sample posts (e.g. "Commuters", "Small business owners near the site", "Parents of \
    school-age children"). Do not invent a segment the sample gives no basis for - if the \
    posts show no real variation in who is engaging, one broad segment is the correct \
-   answer, not four contrived ones.
+   answer, not several contrived ones.
 2. Order segments most-exposed-first (roughly, by how much of the sample they represent).
 3. For each segment, write:
    - segment_name: a short (2-5 word) label for the card (e.g. "Commuters").

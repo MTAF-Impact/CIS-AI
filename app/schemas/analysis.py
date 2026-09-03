@@ -72,9 +72,12 @@ class DebunkSegmentSchema(BaseModel):
 
 
 class DebunkSegmentBatchSchema(BaseModel):
-    """Segments in most-exposed-first order - this order becomes each row's `rank`."""
+    """Segments in most-exposed-first order - this order becomes each row's `rank`.
+    max_length=5 matches AP-21's documented range ceiling (ai.debunk_segment_max_count,
+    default 3) - the actual per-claim cap is enforced downstream in
+    activity_service._generate_debunk_segments, not here."""
 
-    segments: list[DebunkSegmentSchema] = Field(min_length=1, max_length=4)
+    segments: list[DebunkSegmentSchema] = Field(min_length=1, max_length=5)
 
 
 class NonExistingClaimPredictionSchema(BaseModel):

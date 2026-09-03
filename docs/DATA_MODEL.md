@@ -26,6 +26,14 @@ step for exactly this reason. See `GO_INTEGRATION.md` for the full ownership con
 and the HTTP touchpoints that replace direct table access between the two services (8
 endpoints the backend calls on this service, 2 in the reverse direction, as of that doc).
 
+**One deliberate, narrow exception**: `app/services/config_service.py` `SELECT`s
+`cis_settings` directly (never INSERT/UPDATE/DELETE) to read the dynamic scoring
+parameters catalogued in `documentation/CIS/AI_DYNAMIC_PARAMETER.md` and `SCORING.md`'s
+"Dynamic parameters" section — this is the mirror of the backend's own read-only access
+to this service's tables, not a new ownership direction. It has no ORM model on this
+side on purpose (a plain `text()` query), so it can never be created/dropped by
+`Base.metadata.create_all()`/`reset_schema.py`.
+
 All tables live in the same Supabase Postgres instance, `public` schema, with the
 `vector` extension enabled (pgvector, for the `embedding` columns).
 
@@ -139,7 +147,8 @@ embedding-centroid similarity at claim-creation time
 | `updated_at` | `timestamptz` | No | `now()`, auto-updates | |
 
 A new claim attaches to the topic with the highest cosine similarity if that similarity
-is ≥ `TOPIC_ATTACH_THRESHOLD` (0.5); otherwise a brand-new topic is created. This applies
+is ≥ `clustering.topic_attach_threshold` (defaults to `0.5`, dynamic via `cis_settings` -
+see `SCORING.md`'s "Dynamic parameters" section); otherwise a brand-new topic is created. This applies
 identically to both `existing` claims (Pass 2 of clustering) and `non_existing` claims
 (the prediction flow) — no asymmetry between claim types.
 

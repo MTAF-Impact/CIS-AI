@@ -427,8 +427,10 @@ and must never be conflated, per the backend's own note in `AI-INTEGRATION.md`.
 
 **`claim_debunk_segments`** (ask #9) — one row per audience segment, generated
 alongside `activity_content` (same call site, same once-only guard) from the claim's
-Supporting-side sample. `LLMClient.generate_debunk_segments()` returns 1–4 segments;
-`rank` is assignment order (most-exposed first, per the LLM's own ordering). Flow 3's
+Supporting-side sample. `LLMClient.generate_debunk_segments()` returns 1–5 segments,
+deduped then capped to `ai.debunk_segment_max_count` (dynamic via `cis_settings`,
+defaults to `3` — see `AI_DYNAMIC_PARAMETER.md` AP-21); `rank` is assignment order
+(most-exposed first, per the LLM's own ordering, preserved through the cap). Flow 3's
 demo claim populates this too, since it goes through the same
 `clustering_service.build_claim_from_content_items` construction path. On any
 generation failure the row set is simply empty and `activity_content` still exists —
